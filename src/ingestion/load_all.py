@@ -1,93 +1,86 @@
-"""Orchestrate loading all data sources."""
+"""Orchestrate loading of all data."""
 
 import logging
+import time
 from pathlib import Path
-from typing import Optional
+from typing import Dict
+from sqlalchemy.orm import Session
+from .load_companies import load_company_data
+from .load_credit_events import load_credit_event_data
+from .load_macros import load_macro_data
 
-from src.db.init_db import init_db
-from src.ingestion.load_companies import load_companies
-from src.ingestion.load_credit_events import load_credit_events
-from src.ingestion.load_macros import load_macros
-
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def load_all_data(
-    data_dir: str | Path,
-    companies_file: str = "companies.xlsx",
-    events_file: str = "credit_events.xlsx",
-    macros_file: str = "macro_indicators.xlsx",
-    reset_db: bool = False,
-    generate_embeddings: bool = True,
-) -> dict[str, int]:
-    """
-    Load all data from a directory.
+def load_all_data(session: Session, data_dir: Path = None) -> Dict[str, int]:
+    """Load all data from Excel files into database."""
+    if data_dir is None:
+        data_dir = Path("./data")
 
-    Args:
-        data_dir: Directory containing data files
-        companies_file: Company data filename
-        events_file: Credit events filename
-        macros_file: Macro indicators filename
-        reset_db: Whether to reset the database before loading
-        generate_embeddings: Whether to generate embeddings
-
-    Returns:
-        Dictionary with counts of loaded records
-    """
     data_dir = Path(data_dir)
-    logger.info(f"Loading all data from {data_dir}")
+    if not data_dir.exists():
+        raise FileNotFoundError(f"Data directory not found: {data_dir}")
 
-    # Initialize or reset database
-    if reset_db:
-        from src.db.init_db import drop_all
-        logger.warning("Resetting database...")
-        drop_all()
+    logger.info("=" * 60)
+    logger.info("Starting full data load...")
+    logger.info("=" * 60)
 
-    init_db()
+    all_stats = {}
+    total_start = time.time()
 
-    results = {}
+    # Step 1: Load industry mapping and companies
+    try:
+        logger.info("\n[1/4] Loading company data...")
+        step_start = time.time()
+        company_stats = load_company_data(session, data_dir)
+        step_duration = time.time() - step_start
+        logger.info(f"[OK] Company data loaded in {step_duration:.2f}s")
+        all_stats.update(company_stats)
+    except Exception as e:
+        logger.error(f"[ERROR] Failed to load company data: {e}")
+        session.rollback()
+        raise
 
-    # Load companies first (required for foreign keys)
-    companies_path = data_dir / companies_file
-    if companies_path.exists():
-        results["companies"] = load_companies(
-            companies_path,
-            generate_embeddings=generate_embeddings
-        )
-    else:
-        logger.warning(f"Companies file not found: {companies_path}")
-        results["companies"] = 0
+    # Step 2: Load credit events
+    try:
+        logger.info("\n[2/4] Loading credit events...")
+        step_start = time.time()
+        event_stats = load_credit_event_data(session, data_dir)
+        step_duration = time.time() - step_start
+        logger.info(f"[OK] Credit events loaded in {step_duration:.2f}s")
+        all_stats.update(event_stats)
+    except Exception as e:
+        logger.error(f"[ERROR] Failed to load credit events: {e}")
+        session.rollback()
+        raise
 
-    # Load credit events
-    events_path = data_dir / events_file
-    if events_path.exists():
-        results["credit_events"] = load_credit_events(
-            events_path,
-            generate_embeddings=generate_embeddings
-        )
-    else:
-        logger.warning(f"Events file not found: {events_path}")
-        results["credit_events"] = 0
+    # Step 3: Load macroeconomic data
+    try:
+        logger.info("\n[3/4] Loading macroeconomic data...")
+        step_start = time.time()
+        macro_stats = load_macro_data(session, data_dir)
+        step_duration = time.time() - step_start
+        logger.info(f"[OK] Macro data loaded in {step_duration:.2f}s")
+        all_stats.update(macro_stats)
+    except Exception as e:
+        logger.error(f"[ERROR] Failed to load macro data: {e}")
+        session.rollback()
+        raise
 
-    # Load macro indicators
-    macros_path = data_dir / macros_file
-    if macros_path.exists():
-        results["macro_indicators"] = load_macros(macros_path)
-    else:
-        logger.warning(f"Macros file not found: {macros_path}")
-        results["macro_indicators"] = 0
+    # Step 4: TODO - Generate embeddings (placeholder)
+    logger.info("\n[4/4] Embedding generation...")
+    logger.info("Note: Embedding generation not yet implemented")
+    all_stats['embeddings'] = 0
 
+    total_duration = time.time() - total_start
+
+    logger.info("\n" + "=" * 60)
     logger.info("Data loading complete!")
-    logger.info(f"Results: {results}")
-    return results
+    logger.info("=" * 60)
+    logger.info(f"Total time: {total_duration:.2f}s")
+    logger.info("\nRecords loaded:")
+    for key, value in all_stats.items():
+        logger.info(f"  {key:.<30} {value:>10,}")
+    logger.info("=" * 60)
 
-
-if __name__ == "__main__":
-    import sys
-
-    if len(sys.argv) < 2:
-        print("Usage: python -m src.ingestion.load_all <data_directory>")
-        sys.exit(1)
-
-    load_all_data(sys.argv[1], reset_db=True)
+    return all_stats

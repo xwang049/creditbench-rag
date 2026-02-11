@@ -1,114 +1,96 @@
-"""Load credit event data from files."""
+"""Load credit events from Excel."""
 
 import logging
 from pathlib import Path
-from typing import Optional
 from datetime import datetime
 
 import pandas as pd
 from sqlalchemy.orm import Session
 
-from src.db.models import CreditEvent, Company
-from src.db.session import session_scope
-from src.rag.embeddings import generate_embedding
+from src.db.models import CreditEvent
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def load_credit_events(
-    file_path: str | Path,
-    session: Optional[Session] = None,
-    generate_embeddings: bool = True
-) -> int:
-    """
-    Load credit event data from Excel/CSV file.
+def clean_value(value):
+    """Convert NaN and empty strings to None."""
+    if pd.isna(value):
+        return None
+    if isinstance(value, str) and value.strip() == '':
+        return None
+    return value
 
-    Args:
-        file_path: Path to the data file
-        session: Database session (optional, will create if not provided)
-        generate_embeddings: Whether to generate embeddings for events
 
-    Returns:
-        Number of credit events loaded
-    """
-    file_path = Path(file_path)
-    logger.info(f"Loading credit events from {file_path}")
+def convert_to_date(value):
+    """Convert datetime to date, handle None."""
+    if pd.isna(value):
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, str):
+        try:
+            return pd.to_datetime(value).date()
+        except:
+            return None
+    return value
 
-    # Read data file
-    if file_path.suffix in [".xlsx", ".xls"]:
-        df = pd.read_excel(file_path)
-    elif file_path.suffix == ".csv":
-        df = pd.read_csv(file_path)
-    elif file_path.suffix == ".parquet":
-        df = pd.read_parquet(file_path)
-    else:
-        raise ValueError(f"Unsupported file format: {file_path.suffix}")
 
-    logger.info(f"Found {len(df)} credit events in file")
-
-    def _load(session: Session) -> int:
-        # Build company_code to id mapping
-        companies = {c.company_code: c.id for c in session.query(Company).all()}
-        logger.info(f"Found {len(companies)} companies in database")
-
-        count = 0
-        skipped = 0
-
-        for _, row in df.iterrows():
-            company_code = row.get("company_code")
-            if company_code not in companies:
-                logger.warning(f"Company {company_code} not found, skipping event")
-                skipped += 1
-                continue
-
-            # Parse event date
-            event_date = row.get("event_date")
-            if isinstance(event_date, str):
-                event_date = pd.to_datetime(event_date)
-
-            # Create text for embedding
-            text_for_embedding = (
-                f"Event Type: {row.get('event_type', '')}\n"
-                f"Date: {event_date}\n"
-                f"Rating: {row.get('rating_before', '')} -> {row.get('rating_after', '')}\n"
-                f"Description: {row.get('description', '')}"
-            )
-
-            # Generate embedding if requested
-            embedding = None
-            if generate_embeddings:
-                try:
-                    embedding = generate_embedding(text_for_embedding)
-                except Exception as e:
-                    logger.warning(f"Failed to generate embedding: {e}")
-
-            event = CreditEvent(
-                company_id=companies[company_code],
-                event_date=event_date,
-                event_type=row.get("event_type"),
-                rating_before=row.get("rating_before"),
-                rating_after=row.get("rating_after"),
-                description=row.get("description"),
-                total_assets=row.get("total_assets"),
-                total_liabilities=row.get("total_liabilities"),
-                revenue=row.get("revenue"),
-                ebitda=row.get("ebitda"),
-                embedding=embedding,
-            )
-            session.add(event)
-            count += 1
-
-            if count % 100 == 0:
-                session.commit()
-                logger.info(f"Loaded {count} events...")
-
+def load_credit_events(session: Session, excel_path: Path) -> int:
+    """Load credit events from Excel."""
+    logger.info("Loading credit events...")
+    
+    df = pd.read_excel(excel_path, sheet_name="Sheet1")
+    df.columns = df.columns.str.lower().str.replace(' ', '_')
+    
+    logger.info(f"Read {len(df)} credit event rows from Excel")
+    
+    session.query(CreditEvent).delete()
+    session.commit()
+    logger.info("Cleared existing credit_events data")
+    
+    records = []
+    batch_size = 1000
+    
+    for idx, row in df.iterrows():
+        # Strip subcategory if it's a string
+        subcategory = clean_value(row.get('subcategory'))
+        if isinstance(subcategory, str):
+            subcategory = subcategory.strip()
+        
+        record = CreditEvent(
+            u3_company_number=int(row['u3_company_number']),
+            id_bb_company=clean_value(row.get('id_bb_company')),
+            announcement_date=convert_to_date(row.get('announcement_date')),
+            effective_date=convert_to_date(row.get('effective_date')),
+            event_type=clean_value(row.get('event_type')),
+            action_name=clean_value(row.get('action_name')),
+            subcategory=subcategory,
+        )
+        records.append(record)
+        
+        if (idx + 1) % 5000 == 0:
+            logger.info(f"  Prepared {idx + 1} credit events...")
+        
+        if len(records) >= batch_size:
+            session.bulk_save_objects(records)
+            session.commit()
+            logger.info(f"  Inserted {idx + 1} credit events...")
+            records = []
+    
+    if records:
+        session.bulk_save_objects(records)
         session.commit()
-        logger.info(f"Successfully loaded {count} events, skipped {skipped}")
-        return count
+    
+    total = len(df)
+    logger.info(f"[OK] Loaded {total} credit event records")
+    return total
 
-    if session:
-        return _load(session)
-    else:
-        with session_scope() as session:
-            return _load(session)
+
+def load_credit_event_data(session: Session, data_dir: Path) -> dict:
+    """Load credit events from data directory."""
+    excel_path = data_dir / "Credit Events.xlsx"
+    if not excel_path.exists():
+        raise FileNotFoundError(f"Credit events file not found: {excel_path}")
+    
+    count = load_credit_events(session, excel_path)
+    return {'credit_events': count}
