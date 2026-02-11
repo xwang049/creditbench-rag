@@ -35,3 +35,4 @@ class Config:
 
 
 config = Config()
+settings = config  # Alias for compatibility
