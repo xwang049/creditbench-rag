@@ -3,9 +3,10 @@
 from datetime import date, datetime
 from typing import Optional
 
-from sqlalchemy import String, Float, Date, DateTime, Text, Integer, ForeignKey, Index
+from sqlalchemy import String, Float, Date, DateTime, Text, Integer, ForeignKey, Index, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
-from pgvector.sqlalchemy import Vector
+# Note: pgvector embeddings disabled - using Text-to-SQL RAG instead
+# from pgvector.sqlalchemy import Vector
 
 
 class Base(DeclarativeBase):
@@ -60,8 +61,8 @@ class Company(Base):
     id_isin: Mapped[Optional[str]] = mapped_column(String(20), nullable=True, index=True)
     id_cusip: Mapped[Optional[str]] = mapped_column(String(15), nullable=True)
 
-    # Embedding for semantic search
-    embedding: Mapped[Optional[list]] = mapped_column(Vector(1536), nullable=True)
+    # Note: embedding field removed - using Text-to-SQL RAG instead of vector search
+    # embedding: Mapped[Optional[list]] = mapped_column(Vector(1536), nullable=True)
 
     # Metadata
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -98,8 +99,8 @@ class CreditEvent(Base):
     action_name: Mapped[Optional[str]] = mapped_column(String(100), index=True)  # Delisting, Default Corp Action, Bankruptcy Filing, etc.
     subcategory: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
-    # Embedding for semantic search
-    embedding: Mapped[Optional[list]] = mapped_column(Vector(1536), nullable=True)
+    # Note: embedding field removed - using Text-to-SQL RAG instead of vector search
+    # embedding: Mapped[Optional[list]] = mapped_column(Vector(1536), nullable=True)
 
     # Metadata
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -251,11 +252,66 @@ class MacroFX(Base):
         return f"<MacroFX(date={self.date}, eurusd={self.eurusd}, usdjpy={self.usdjpy}, usdcny={self.usdcny})>"
 
 
-# Create indexes for vector similarity search
-Index("idx_companies_embedding", Company.embedding, postgresql_using="ivfflat")
-Index("idx_credit_events_embedding", CreditEvent.embedding, postgresql_using="ivfflat")
+# Note: CreditEventEmbedding table disabled - using Text-to-SQL RAG instead of vector embeddings
+# If you need vector embeddings in the future, uncomment this class and the pgvector import above
+#
+# class CreditEventEmbedding(Base):
+#     """Vector embeddings for credit events for semantic search."""
+#     __tablename__ = "credit_event_embeddings"
+#     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+#     credit_event_id: Mapped[int] = mapped_column(Integer, ForeignKey("credit_events.id"), unique=True, index=True)
+#     embedding: Mapped[list] = mapped_column(Vector(1024), nullable=False)
+#     text_content: Mapped[str] = mapped_column(Text, nullable=False)
+#     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+#     embedding_model: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+
+
+class RiskIndicator(Base):
+    """Company-level risk indicators and financial metrics by month."""
+
+    __tablename__ = "risk_indicators"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    # Company reference
+    u3_company_number: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("companies.u3_company_number"),
+        index=True
+    )
+
+    # Time period
+    year: Mapped[int] = mapped_column(Integer, nullable=False)
+    month: Mapped[int] = mapped_column(Integer, nullable=False)  # 1-12
+
+    # Risk indicators
+    stk_index: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    st_int: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # Short-term interest rate
+    m2b: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # Market-to-book ratio
+    sigma: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # Stock volatility
+    dtd_median: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # Distance-to-Default median (column H)
+    dtd_median_i: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # Distance-to-Default median (column I)
+    dtd: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # Distance-to-Default (most important)
+    liquidity_r: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # Liquidity ratio
+    ni2ta: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # Net income to total assets
+    size: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # Company size
+    liquidity_fin: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # Financial liquidity
+
+    __table_args__ = (
+        UniqueConstraint('u3_company_number', 'year', 'month', name='uq_risk_indicators_company_year_month'),
+    )
+
+    def __repr__(self) -> str:
+        return f"<RiskIndicator(u3={self.u3_company_number}, year={self.year}, month={self.month}, dtd={self.dtd})>"
+
+
+# Note: Vector indexes disabled - using Text-to-SQL RAG instead of vector search
+# Index("idx_companies_embedding", Company.embedding, postgresql_using="ivfflat")
+# Index("idx_credit_events_embedding", CreditEvent.embedding, postgresql_using="ivfflat")
+# Index("idx_credit_event_embeddings_hnsw", CreditEventEmbedding.embedding, postgresql_using="hnsw")
 
 # Create composite indexes for common queries
 Index("idx_companies_ticker_status", Company.ticker, Company.market_status)
 Index("idx_credit_events_date_type", CreditEvent.announcement_date, CreditEvent.event_type)
 Index("idx_credit_events_action", CreditEvent.action_name, CreditEvent.announcement_date)
+Index("ix_risk_year_month", RiskIndicator.year, RiskIndicator.month)
