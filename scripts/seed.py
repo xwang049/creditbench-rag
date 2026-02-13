@@ -10,6 +10,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.db.init_db import init_database
 from src.db.session import get_session
 from src.ingestion.load_all import load_all_data
+from src.ingestion.load_companies import load_company_data
+from src.ingestion.load_credit_events import load_credit_event_data
+from src.ingestion.load_macros import load_macro_data
+from src.ingestion.load_risk_indicators import load_risk_indicator_data
 from src.config import settings
 
 
@@ -41,6 +45,12 @@ def main():
         '--verbose', '-v',
         action='store_true',
         help='Enable verbose logging'
+    )
+    parser.add_argument(
+        '--only',
+        type=str,
+        choices=['companies', 'credit_events', 'macros', 'risk_indicators'],
+        help='Load only a specific dataset (default: load all)'
     )
 
     args = parser.parse_args()
@@ -74,38 +84,60 @@ def main():
         print("Step 1: Skipped database initialization (--skip-init)")
         print()
 
-    # Step 2: Load all data
-    print("Step 2: Loading data from source files...")
+    # Step 2: Load data (all or specific dataset)
+    if args.only:
+        print(f"Step 2: Loading {args.only} data only...")
+    else:
+        print("Step 2: Loading all data from source files...")
     print("-" * 60)
 
     try:
         with get_session() as session:
-            stats = load_all_data(session, data_dir)
+            # Load specific dataset or all data
+            if args.only == 'companies':
+                stats = load_company_data(session, data_dir)
+            elif args.only == 'credit_events':
+                stats = load_credit_event_data(session, data_dir)
+            elif args.only == 'macros':
+                stats = load_macro_data(session, data_dir)
+            elif args.only == 'risk_indicators':
+                stats = load_risk_indicator_data(session, data_dir)
+            else:
+                stats = load_all_data(session, data_dir)
 
             print()
             print("=" * 60)
             print("Data Loading Summary:")
             print("=" * 60)
 
-            print("\nCompany Data:")
-            print(f"  Industry mappings:     {stats.get('industry_mapping', 0):>10,}")
-            print(f"  Companies:             {stats.get('companies', 0):>10,}")
+            if args.only:
+                # Print only the loaded dataset stats
+                for key, value in stats.items():
+                    print(f"  {key:.<30} {value:>10,}")
+            else:
+                # Print all stats with categories
+                print("\nCompany Data:")
+                print(f"  Industry mappings:     {stats.get('industry_mapping', 0):>10,}")
+                print(f"  Companies:             {stats.get('companies', 0):>10,}")
 
-            print("\nCredit Events:")
-            print(f"  Credit events:         {stats.get('credit_events', 0):>10,}")
+                print("\nCredit Events:")
+                print(f"  Credit events:         {stats.get('credit_events', 0):>10,}")
 
-            print("\nMacroeconomic Data:")
-            print(f"  Commodity prices:      {stats.get('commodities', 0):>10,}")
-            print(f"  Bond yields:           {stats.get('bond_yields', 0):>10,}")
-            print(f"  US macro indicators:   {stats.get('us_macros', 0):>10,}")
-            print(f"  FX rates:              {stats.get('fx_rates', 0):>10,}")
+                print("\nMacroeconomic Data:")
+                print(f"  Commodity prices:      {stats.get('commodities', 0):>10,}")
+                print(f"  Bond yields:           {stats.get('bond_yields', 0):>10,}")
+                print(f"  US macro indicators:   {stats.get('us_macros', 0):>10,}")
+                print(f"  FX rates:              {stats.get('fx_rates', 0):>10,}")
 
-            print("\nEmbeddings:")
-            print(f"  Embeddings generated:  {stats.get('embeddings', 0):>10,}")
+                print("\nRisk Indicators:")
+                print(f"  Risk indicators:       {stats.get('risk_indicators', 0):>10,}")
+
+                print("\nEmbeddings:")
+                print(f"  Embeddings generated:  {stats.get('embeddings', 0):>10,}")
 
             print("=" * 60)
             print()
-            print("[OK] All data loaded successfully!")
+            print("[OK] Data loaded successfully!")
 
     except Exception as e:
         logger.error(f"\n[ERROR] Failed to load data: {e}")

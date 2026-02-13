@@ -21,14 +21,23 @@ engine = create_engine(
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
-def get_session() -> Session:
-    """Get a new database session."""
-    return SessionLocal()
+@contextmanager
+def get_session() -> Generator[Session, None, None]:
+    """Get a new database session with context manager support."""
+    session = SessionLocal()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
 @contextmanager
 def session_scope() -> Generator[Session, None, None]:
-    """Provide a transactional scope for database operations."""
+    """Provide a transactional scope for database operations (alias for get_session)."""
     session = SessionLocal()
     try:
         yield session
