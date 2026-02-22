@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 from math import floor
 
+import numpy as np
 import pandas as pd
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -14,13 +15,16 @@ logger = logging.getLogger(__name__)
 
 
 def clean_value(value):
-    """Convert NaN, 'NA', 'N/A', and empty strings to None."""
+    """Convert NaN, 'NA', 'N/A', and empty strings to None, and numpy types to Python types."""
     if pd.isna(value):
         return None
     if isinstance(value, str):
         stripped = value.strip()
         if stripped == '' or stripped.upper() in ('NA', 'N/A'):
             return None
+    # Convert numpy types to Python native types
+    if isinstance(value, (np.integer, np.floating)):
+        return value.item()
     return value
 
 
