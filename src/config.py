@@ -22,6 +22,22 @@ class Config:
     EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
     LLM_MODEL: str = os.getenv("LLM_MODEL", "claude-3-5-sonnet-20241022")
 
+    # Data Source (local OneDrive mount)
+    DATA_DIR: str = os.getenv("DATA_DIR", "./data")
+
+    # Azure Blob Storage (optional — if set, DuckDB queries parquet from Azure)
+    AZURE_STORAGE_ACCOUNT: str = os.getenv("AZURE_STORAGE_ACCOUNT", "")
+    AZURE_STORAGE_SAS_TOKEN: str = os.getenv("AZURE_STORAGE_SAS_TOKEN", "")
+    AZURE_BLOB_CONTAINER: str = os.getenv("AZURE_BLOB_CONTAINER", "creditbench")
+    AZURE_FUNDAMENTALS_PATH: str = os.getenv("AZURE_FUNDAMENTALS_PATH", "foundamentals")
+
+    # Embedding (Gemini)
+    GOOGLE_API_KEY: str = os.getenv("GOOGLE_API_KEY", "")
+
+    @property
+    def use_azure(self) -> bool:
+        return bool(self.AZURE_STORAGE_ACCOUNT and self.AZURE_STORAGE_SAS_TOKEN)
+
     # Application Settings
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 

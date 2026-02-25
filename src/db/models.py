@@ -3,10 +3,9 @@
 from datetime import date, datetime
 from typing import Optional
 
-from sqlalchemy import String, Float, Date, DateTime, Text, Integer, ForeignKey, Index, UniqueConstraint
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import BigInteger, SmallInteger, String, Float, Date, DateTime, Text, Integer, ForeignKey, Index, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
-# Note: pgvector embeddings disabled - using Text-to-SQL RAG instead
-# from pgvector.sqlalchemy import Vector
 
 
 class Base(DeclarativeBase):
@@ -266,6 +265,32 @@ class MacroFX(Base):
 #     embedding_model: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
 
 
+class MarketData(Base):
+    """Daily market data (price, volume, market cap) per company."""
+
+    __tablename__ = "market_data"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    u3_company_number: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("companies.u3_company_number"),
+        index=True,
+    )
+    trading_date: Mapped[date] = mapped_column(Date, index=True)
+    last_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    shares_outstanding: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    volume: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    marketcap: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("u3_company_number", "trading_date", name="uq_market_data_company_date"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<MarketData(u3={self.u3_company_number}, date={self.trading_date}, mktcap={self.marketcap})>"
+
+
 class RiskIndicator(Base):
     """Company-level risk indicators and financial metrics by month."""
 
@@ -305,13 +330,47 @@ class RiskIndicator(Base):
         return f"<RiskIndicator(u3={self.u3_company_number}, year={self.year}, month={self.month}, dtd={self.dtd})>"
 
 
-# Note: Vector indexes disabled - using Text-to-SQL RAG instead of vector search
-# Index("idx_companies_embedding", Company.embedding, postgresql_using="ivfflat")
-# Index("idx_credit_events_embedding", CreditEvent.embedding, postgresql_using="ivfflat")
-# Index("idx_credit_event_embeddings_hnsw", CreditEventEmbedding.embedding, postgresql_using="hnsw")
+class TranscriptChunk(Base):
+    """One utterance / paragraph from an earnings call transcript, with embedding."""
 
-# Create composite indexes for common queries
+    __tablename__ = "transcript_chunks"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+
+    # Natural unique key from parquet (_COL_17)
+    paragraph_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False, index=True)
+
+    # Company reference
+    u3_company_number: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("companies.u3_company_number"), index=True, nullable=True
+    )
+
+    # Call metadata
+    call_date: Mapped[Optional[date]] = mapped_column(Date, index=True, nullable=True)
+    year: Mapped[Optional[int]] = mapped_column(SmallInteger, index=True, nullable=True)
+    quarter: Mapped[Optional[int]] = mapped_column(SmallInteger, nullable=True)
+    event_title: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Speaker metadata
+    speaker_type: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)   # Executives/Analysts/...
+    utterance_type: Mapped[Optional[str]] = mapped_column(String(80), nullable=True) # Answer/Question/...
+    speaker_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    speaker_title: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+
+    # Text and vector
+    text_content: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding: Mapped[Optional[list]] = mapped_column(Vector(768), nullable=True)
+    embedding_model: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    embedded_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<TranscriptChunk(id={self.id}, u3={self.u3_company_number}, date={self.call_date}, speaker={self.speaker_name})>"
+
+
+# Composite indexes for common queries
 Index("idx_companies_ticker_status", Company.ticker, Company.market_status)
 Index("idx_credit_events_date_type", CreditEvent.announcement_date, CreditEvent.event_type)
 Index("idx_credit_events_action", CreditEvent.action_name, CreditEvent.announcement_date)
 Index("ix_risk_year_month", RiskIndicator.year, RiskIndicator.month)
+Index("idx_transcript_company_date", TranscriptChunk.u3_company_number, TranscriptChunk.call_date)
+Index("idx_transcript_year_quarter", TranscriptChunk.year, TranscriptChunk.quarter)

@@ -9,6 +9,7 @@ from .load_companies import load_company_data
 from .load_credit_events import load_credit_event_data
 from .load_macros import load_macro_data
 from .load_risk_indicators import load_risk_indicator_data
+from src.config import config
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +17,7 @@ logger = logging.getLogger(__name__)
 def load_all_data(session: Session, data_dir: Path = None) -> Dict[str, int]:
     """Load all data from Excel files into database."""
     if data_dir is None:
-        data_dir = Path("./data")
+        data_dir = Path(config.DATA_DIR)
 
     data_dir = Path(data_dir)
     if not data_dir.exists():
@@ -48,7 +49,9 @@ def load_all_data(session: Session, data_dir: Path = None) -> Dict[str, int]:
         step_start = time.time()
         event_stats = load_credit_event_data(session, data_dir)
         step_duration = time.time() - step_start
-        logger.info(f"[OK] Credit events loaded in {step_duration:.2f}s")
+        new = event_stats.get('credit_events_new', 0)
+        skipped = event_stats.get('credit_events_skipped', 0)
+        logger.info(f"[OK] Credit events loaded in {step_duration:.2f}s ({new} new, {skipped} skipped)")
         all_stats.update(event_stats)
     except Exception as e:
         logger.error(f"[ERROR] Failed to load credit events: {e}")
