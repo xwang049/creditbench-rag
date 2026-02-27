@@ -11,7 +11,12 @@ import pytest
 from src.benchmark.config import BenchmarkConfig
 from src.benchmark.case_builder import CaseRecord
 from src.benchmark.evaluator import evaluate, _manual_auc, print_report
-from src.benchmark.prompt_builder import build_prompt
+from src.benchmark.prompt_builder import (
+    build_prompt,
+    _build_year_map,
+    _blur_years_in_text,
+    _anonymize_company_dict,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -25,8 +30,15 @@ class TestBenchmarkConfig:
         assert cfg.lookback_months == 12
         assert cfg.n_default_cases == 100
         assert cfg.n_control_cases == 100
-        assert cfg.include_risk_indicators is True
+        # Risk indicators and market data are OFF by default (limited coverage)
+        assert cfg.include_risk_indicators is False
+        assert cfg.include_market_data is False
+        # Macro and fundamentals are ON by default
+        assert cfg.include_macro is True
         assert cfg.include_fundamentals is True
+        # Contamination-prevention ON by default
+        assert cfg.anonymize_company is True
+        assert cfg.blur_year is True
 
     def test_custom_values(self):
         cfg = BenchmarkConfig(prediction_horizon_months=12, lookback_months=24, n_default_cases=50)
@@ -37,6 +49,16 @@ class TestBenchmarkConfig:
     def test_no_fundamentals_flag(self):
         cfg = BenchmarkConfig(include_fundamentals=False)
         assert cfg.include_fundamentals is False
+
+    def test_opt_in_risk_and_market(self):
+        cfg = BenchmarkConfig(include_risk_indicators=True, include_market_data=True)
+        assert cfg.include_risk_indicators is True
+        assert cfg.include_market_data is True
+
+    def test_disable_anonymization(self):
+        cfg = BenchmarkConfig(anonymize_company=False, blur_year=False)
+        assert cfg.anonymize_company is False
+        assert cfg.blur_year is False
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +233,161 @@ class TestManualAUC:
 
 
 # ---------------------------------------------------------------------------
-# PromptBuilder tests
+# Year-blurring unit tests
+# ---------------------------------------------------------------------------
+
+class TestBuildYearMap:
+    def test_cutoff_year_is_Y0(self):
+        ym = _build_year_map(2020)
+        assert ym[2020] == "Y0"
+
+    def test_prior_years(self):
+        ym = _build_year_map(2020)
+        assert ym[2019] == "Y-1"
+        assert ym[2018] == "Y-2"
+        assert ym[2010] == "Y-10"
+
+    def test_future_years(self):
+        ym = _build_year_map(2020)
+        assert ym[2021] == "Y+1"
+        assert ym[2022] == "Y+2"
+
+    def test_coverage_span(self):
+        ym = _build_year_map(2020)
+        # Should cover at least 20 years back and 2 years forward
+        assert 2000 in ym
+        assert 1990 in ym
+        assert 2022 in ym
+
+
+class TestBlurYearsInText:
+    """Tests that only date/fiscal-period years are replaced, not numeric levels."""
+
+    def _ym(self) -> dict[int, str]:
+        return _build_year_map(2020)
+
+    # --- ISO dates -----------------------------------------------------------
+    def test_iso_date_full(self):
+        result = _blur_years_in_text("As of 2020-06-01", self._ym())
+        assert "Y0-06-01" in result
+        assert "2020" not in result
+
+    def test_iso_date_year_month_only(self):
+        result = _blur_years_in_text("2019-12", self._ym())
+        assert "Y-1-12" in result
+        assert "2019" not in result
+
+    def test_multiple_iso_dates(self):
+        result = _blur_years_in_text(
+            "cutoff 2020-06-01 end 2020-12-01 prior 2018-03-15", self._ym()
+        )
+        assert "Y0-06-01" in result
+        assert "Y0-12-01" in result
+        assert "Y-2-03-15" in result
+        assert "2020" not in result
+        assert "2018" not in result
+
+    # --- Fiscal periods ------------------------------------------------------
+    def test_fiscal_year_A_suffix(self):
+        result = _blur_years_in_text("Period: 2020A 2019A", self._ym())
+        assert "Y0A" in result
+        assert "Y-1A" in result
+
+    def test_fiscal_quarter_Q_suffix(self):
+        result = _blur_years_in_text("2019Q3", self._ym())
+        assert "Y-1Q3" in result
+        assert "2019" not in result
+
+    # --- Numeric levels (must NOT be blurred) --------------------------------
+    def test_sp500_level_preserved(self):
+        """S&P500 values like 2000, 2400 must not be replaced."""
+        result = _blur_years_in_text("S&P500=2000, VIX=24.3", self._ym())
+        assert "2000" in result        # numeric level — untouched
+        assert "24.3" in result
+
+    def test_vix_and_yield_levels_preserved(self):
+        result = _blur_years_in_text("VIX=80.0, 10Y=3.84%, CPI=230.5", self._ym())
+        assert "80.0" in result
+        assert "3.84" in result
+        assert "230.5" in result
+
+    def test_revenue_large_number_preserved(self):
+        # "2000.5M" — followed by "." so NOT matching YYYY-MM pattern;
+        # also not followed by A/Q. Must remain unchanged.
+        result = _blur_years_in_text("Revenue: 2000.5M, Assets: 19000B", self._ym())
+        assert "2000.5M" in result
+
+    def test_risk_indicator_year_month_column(self):
+        # Risk indicator table rows look like "2020-06   DTD=5.2"
+        result = _blur_years_in_text("2020-06   5.2   0.35", self._ym())
+        assert "Y0-06" in result
+        assert "5.2" in result
+
+    def test_macro_row_with_date_and_levels(self):
+        line = "As of 2020-06-01: S&P500=3100, VIX=28.1, Unemp=13.3%, CPI=257.0"
+        result = _blur_years_in_text(line, self._ym())
+        assert "Y0-06-01" in result
+        assert "3100" in result
+        assert "28.1" in result
+        assert "13.3" in result
+        assert "2020" not in result
+
+    def test_bond_yield_row(self):
+        line = "Treasury yields (2020-06-01): 2Y=0.17%, 10Y=0.65%, 30Y=1.41%"
+        result = _blur_years_in_text(line, self._ym())
+        assert "Y0-06-01" in result
+        assert "0.17" in result
+        assert "0.65" in result
+        assert "2020" not in result
+
+
+# ---------------------------------------------------------------------------
+# Company anonymisation unit tests
+# ---------------------------------------------------------------------------
+
+class TestAnonymizeCompanyDict:
+    def _make_company(self) -> dict:
+        return {
+            "u3_company_number": 99999,
+            "id_bb_company": 12345,
+            "ticker": "TEST US",
+            "company_name": "Test Corp",
+            "country_name": "United States",
+            "market_status": "—",
+            "prime_exchange": "—",
+            "id_isin": None,
+            "industry_sector": "Energy",
+            "industry_group": None,
+            "industry_subgroup": None,
+        }
+
+    def test_name_replaced(self):
+        anon = _anonymize_company_dict(self._make_company())
+        assert "Test Corp" not in anon["company_name"]
+        assert "99999" in anon["company_name"]
+
+    def test_ticker_replaced(self):
+        anon = _anonymize_company_dict(self._make_company())
+        assert "TEST US" not in anon["ticker"]
+        assert "99999" in anon["ticker"]
+
+    def test_sector_preserved(self):
+        anon = _anonymize_company_dict(self._make_company())
+        assert anon["industry_sector"] == "Energy"
+
+    def test_country_preserved(self):
+        anon = _anonymize_company_dict(self._make_company())
+        assert anon["country_name"] == "United States"
+
+    def test_original_dict_not_mutated(self):
+        original = self._make_company()
+        _ = _anonymize_company_dict(original)
+        assert original["company_name"] == "Test Corp"
+        assert original["ticker"] == "TEST US"
+
+
+# ---------------------------------------------------------------------------
+# PromptBuilder integration tests
 # ---------------------------------------------------------------------------
 
 class TestPromptBuilder:
@@ -251,22 +427,28 @@ class TestPromptBuilder:
             "transcripts": [],
         }
 
+    # --- Tests with both flags DISABLED (explicit raw mode) ------------------
+
     def test_prompt_contains_cutoff_date(self):
-        cfg = BenchmarkConfig(prediction_horizon_months=6)
+        """Cutoff date is present in raw form when blur_year=False."""
+        cfg = BenchmarkConfig(prediction_horizon_months=6,
+                              anonymize_company=False, blur_year=False)
         case = self._make_case()
         data = self._make_data()
         prompt = build_prompt(data, case, cfg)
         assert "2020-06-01" in prompt
 
     def test_prompt_contains_horizon(self):
-        cfg = BenchmarkConfig(prediction_horizon_months=6)
+        cfg = BenchmarkConfig(prediction_horizon_months=6,
+                              anonymize_company=False, blur_year=False)
         case = self._make_case()
         data = self._make_data()
         prompt = build_prompt(data, case, cfg)
         assert "6 months" in prompt
 
     def test_prompt_contains_end_date(self):
-        cfg = BenchmarkConfig(prediction_horizon_months=6)
+        cfg = BenchmarkConfig(prediction_horizon_months=6,
+                              anonymize_company=False, blur_year=False)
         case = self._make_case()
         data = self._make_data()
         prompt = build_prompt(data, case, cfg)
@@ -274,19 +456,130 @@ class TestPromptBuilder:
         assert "2020-12-01" in prompt
 
     def test_prompt_warns_no_future_data(self):
-        cfg = BenchmarkConfig()
+        cfg = BenchmarkConfig(anonymize_company=False, blur_year=False)
         case = self._make_case()
         data = self._make_data()
         prompt = build_prompt(data, case, cfg)
         assert "NOT" in prompt or "IMPORTANT" in prompt
 
     def test_prompt_is_nonempty_string(self):
-        cfg = BenchmarkConfig()
+        cfg = BenchmarkConfig(anonymize_company=False, blur_year=False)
         case = self._make_case()
         data = self._make_data()
         prompt = build_prompt(data, case, cfg)
         assert isinstance(prompt, str)
         assert len(prompt) > 200
+
+    # --- Anonymization tests -------------------------------------------------
+
+    def test_anonymize_hides_company_name(self):
+        cfg = BenchmarkConfig(anonymize_company=True, blur_year=False)
+        case = self._make_case()
+        data = self._make_data()
+        prompt = build_prompt(data, case, cfg)
+        assert "Test Corp" not in prompt
+        assert "Company-1" in prompt or "U3-1" in prompt
+
+    def test_anonymize_hides_ticker(self):
+        cfg = BenchmarkConfig(anonymize_company=True, blur_year=False)
+        case = self._make_case()
+        data = self._make_data()
+        prompt = build_prompt(data, case, cfg)
+        assert "TEST US" not in prompt
+
+    def test_sector_still_present_after_anonymize(self):
+        cfg = BenchmarkConfig(anonymize_company=True, blur_year=False)
+        case = self._make_case()
+        data = self._make_data()
+        prompt = build_prompt(data, case, cfg)
+        assert "Energy" in prompt
+
+    # --- Year blurring tests -------------------------------------------------
+
+    def test_blur_year_removes_calendar_year_from_cutoff(self):
+        cfg = BenchmarkConfig(anonymize_company=False, blur_year=True)
+        case = self._make_case()
+        data = self._make_data()
+        prompt = build_prompt(data, case, cfg)
+        assert "2020-06-01" not in prompt
+        assert "Y0-06-01" in prompt
+
+    def test_blur_year_replaces_end_date_year(self):
+        cfg = BenchmarkConfig(prediction_horizon_months=6,
+                              anonymize_company=False, blur_year=True)
+        case = self._make_case()
+        data = self._make_data()
+        prompt = build_prompt(data, case, cfg)
+        assert "2020-12-01" not in prompt
+        assert "Y0-12-01" in prompt
+
+    def test_blur_year_preserves_horizon_integer(self):
+        """The '6 months' integer must not be touched."""
+        cfg = BenchmarkConfig(prediction_horizon_months=6,
+                              anonymize_company=False, blur_year=True)
+        case = self._make_case()
+        data = self._make_data()
+        prompt = build_prompt(data, case, cfg)
+        assert "6 months" in prompt
+
+    # --- Default config (both flags ON) tests --------------------------------
+
+    def test_default_cfg_blurs_and_anonymizes(self):
+        cfg = BenchmarkConfig()   # anonymize_company=True, blur_year=True
+        case = self._make_case()
+        data = self._make_data()
+        prompt = build_prompt(data, case, cfg)
+        assert "Test Corp" not in prompt
+        assert "TEST US" not in prompt
+        assert "2020-06-01" not in prompt
+        assert "Y0-06-01" in prompt
+
+    def test_prompt_with_fundamentals_blurs_fiscal_periods(self):
+        """Fiscal periods like 2019A, 2020A in income statement are blurred."""
+        cfg = BenchmarkConfig(anonymize_company=False, blur_year=True)
+        case = self._make_case()
+        data = self._make_data()
+        data["fundamentals"]["income_statement"] = [
+            {"FISCAL_YEAR_PERIOD": "2019A", "SALES_REV_TURN": 500e6,
+             "EBIT": 50e6, "EBITDA": 80e6, "NET_INCOME": 30e6},
+            {"FISCAL_YEAR_PERIOD": "2020A", "SALES_REV_TURN": 450e6,
+             "EBIT": 30e6, "EBITDA": 60e6, "NET_INCOME": 10e6},
+        ]
+        prompt = build_prompt(data, case, cfg)
+        assert "2019A" not in prompt
+        assert "2020A" not in prompt
+        assert "Y-1A" in prompt
+        assert "Y0A" in prompt
+
+    def test_prompt_with_macro_preserves_levels(self):
+        """VIX, yield levels must survive year blurring."""
+        cfg = BenchmarkConfig(anonymize_company=False, blur_year=True)
+        case = self._make_case()
+        data = self._make_data()
+        data["macro"] = {
+            "us": {
+                "date": "2020-06-01",
+                "sp500": 3100.0,
+                "vix": 28.1,
+                "unemployment": 13.3,
+                "cpi": 257.0,
+            },
+            "bond_yields": {
+                "date": "2020-06-01",
+                "us_2y": 0.17,
+                "us_5y": 0.37,
+                "us_10y": 0.65,
+                "us_30y": 1.41,
+            },
+        }
+        prompt = build_prompt(data, case, cfg)
+        # Macro levels preserved  (_fmt formats 3100 as "3,100" with comma)
+        assert "28.1" in prompt
+        assert "0.65" in prompt
+        assert "3,100" in prompt
+        # Date year blurred
+        assert "2020-06-01" not in prompt
+        assert "Y0-06-01" in prompt
 
 
 # ---------------------------------------------------------------------------

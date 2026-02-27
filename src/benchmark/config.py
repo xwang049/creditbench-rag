@@ -15,11 +15,17 @@ class BenchmarkConfig:
         n_control_cases: Max number of control cases (Group 2).
         llm_model: Claude model ID.
         include_risk_indicators: Include DTD/sigma/etc. from risk_indicators table.
-            Note: data only covers 1988–2003; may be missing for modern events.
+            NOTE: data only covers 1988–2003; disabled by default for modern events.
         include_market_data: Include daily price/marketcap/volume from market_data.
-        include_macro: Include macro context (VIX, yields, etc.).
+            Disabled by default per researcher data-scope decision.
+        include_macro: Include macro context (VIX, yields, SP500, etc.).
         include_fundamentals: Include financial statements from DuckDB parquet.
             Skipped automatically if parquet files are not found locally.
+        anonymize_company: Replace company name and ticker with u3_company_number.
+            Reduces look-up-table contamination from LLM training memory.
+        blur_year: Replace actual calendar years in dates with relative labels
+            (Y0 = cutoff year, Y-1 = one year prior, etc.).  Month/day and all
+            numeric macro levels (VIX, yields, prices) are preserved unchanged.
         output_dir: Directory to write JSONL and summary files.
         random_seed: Seed for reproducible control-group sampling.
     """
@@ -28,9 +34,14 @@ class BenchmarkConfig:
     n_default_cases: int = 100
     n_control_cases: int = 100
     llm_model: str = "claude-sonnet-4-6"
-    include_risk_indicators: bool = True
-    include_market_data: bool = True
+    # Data-type toggles
+    include_risk_indicators: bool = False   # coverage ends 2003; off by default
+    include_market_data: bool = False        # excluded per data-scope decision
     include_macro: bool = True
     include_fundamentals: bool = True
+    # Contamination-prevention
+    anonymize_company: bool = True          # replace name/ticker with u3 ID
+    blur_year: bool = True                  # map YYYY → Y0/Y-1/… in all dates
+    # Output
     output_dir: str = "results/benchmark"
     random_seed: int = 42
