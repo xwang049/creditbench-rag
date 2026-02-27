@@ -89,13 +89,16 @@ def run_static(data_dir: Path) -> dict:
     return results
 
 
-def run_transcripts(data_dir: Path) -> dict:
+def run_transcripts(data_dir: Path, year_from: int | None = None, year_to: int | None = None) -> dict:
     """Incremental embedding of transcript chunks."""
     logger.info("─" * 50)
-    logger.info("Transcript Embeddings (incremental)")
+    label = "Transcript Embeddings (incremental)"
+    if year_from or year_to:
+        label += f" [{year_from or ''}–{year_to or ''}]"
+    logger.info(label)
     start = time.time()
     with get_session() as session:
-        result = load_transcripts(session, data_dir)
+        result = load_transcripts(session, data_dir, year_from=year_from, year_to=year_to)
     elapsed = time.time() - start
     logger.info(f"Done in {elapsed:.1f}s → {result}")
     return result
@@ -107,6 +110,8 @@ def main():
     parser.add_argument("--market-data", action="store_true", help="Incremental update of market data (mktcap)")
     parser.add_argument("--static", action="store_true", help="Full reload of companies, macros, risk indicators")
     parser.add_argument("--transcripts", action="store_true", help="Incremental embedding of transcript chunks")
+    parser.add_argument("--year-from", type=int, default=None, help="Only embed transcripts from this year (e.g. 2020)")
+    parser.add_argument("--year-to", type=int, default=None, help="Only embed transcripts up to this year (e.g. 2024)")
     parser.add_argument("--all", action="store_true", help="Run everything (static reload + all incremental)")
     parser.add_argument("--data-dir", type=str, default=None, help="Override DATA_DIR from .env")
     args = parser.parse_args()
@@ -137,7 +142,7 @@ def main():
         all_results.update(run_market_data(data_dir))
 
     if args.all or args.transcripts:
-        all_results.update(run_transcripts(data_dir))
+        all_results.update(run_transcripts(data_dir, year_from=args.year_from, year_to=args.year_to))
 
     logger.info("=" * 50)
     logger.info(f"All done in {time.time() - total_start:.1f}s")
