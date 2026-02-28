@@ -117,7 +117,7 @@ def build_prompt(
     """Build the full prompt string for a benchmark case.
 
     Args:
-        data:  Dict returned by benchmark.data_fetcher.fetch_for_case()
+        data:  Dict returned by pipeline.data_fetcher.fetch_all()
         case:  CaseRecord (used for cutoff_date and horizon)
         cfg:   BenchmarkConfig
 

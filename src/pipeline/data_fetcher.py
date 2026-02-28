@@ -347,20 +347,37 @@ def _fetch_transcripts(
     ]
 
 
+def fundamentals_available() -> bool:
+    """Return True if at least one fundamentals parquet file is accessible locally."""
+    local_dir = Path(config.DATA_DIR) / "foundamentals"
+    return local_dir.exists() and any(local_dir.glob("*.parquet"))
+
+
 def fetch_all(
     session: Session,
     company: dict,
     fundamentals_years: int = 6,
     as_of: Optional[date] = None,
+    include_fundamentals: bool = True,
+    include_risk_indicators: bool = True,
+    include_market_data: bool = True,
+    include_macro: bool = True,
+    include_transcripts: bool = True,
+    lookback_months: Optional[int] = None,
 ) -> dict:
     """Fetch all available data for a company.
 
     Args:
-        session:            Active DB session
-        company:            Dict from company_lookup.lookup()
-        fundamentals_years: How many annual periods to pull from fundamentals
-        as_of:              If provided, only include data up to this date.
-                            Use this for benchmark experiments to avoid look-ahead bias.
+        session:               Active DB session
+        company:               Dict with at least u3_company_number and id_bb_company
+        fundamentals_years:    How many annual periods to pull from fundamentals
+        as_of:                 If provided, only include data up to this date.
+        include_fundamentals:  Pull income statement / balance sheet / cash flow
+        include_risk_indicators: Pull DTD / sigma / etc.
+        include_market_data:   Pull daily price / market cap
+        include_macro:         Pull macro snapshot
+        include_transcripts:   Pull earnings call transcript chunks
+        lookback_months:       If set, limit risk_indicators and market_data windows
 
     Returns:
         Dict with keys: company, fundamentals, risk_indicators,
@@ -372,12 +389,33 @@ def fetch_all(
     logger.info(f"Fetching data for {company['company_name']} (u3={u3}, bb={bb})"
                 + (f" as_of={as_of}" if as_of else ""))
 
-    fundamentals = _fetch_fundamentals(bb, years=fundamentals_years, as_of=as_of)
-    risk = _fetch_risk_indicators(session, u3, as_of=as_of)
-    market = _fetch_market_data(session, u3, as_of=as_of)
+    # Fundamentals
+    empty_fundamentals = {"income_statement": [], "balance_sheet": [], "cash_flow": []}
+    if include_fundamentals and bb is not None and fundamentals_available():
+        try:
+            fundamentals = _fetch_fundamentals(bb, years=fundamentals_years, as_of=as_of)
+        except Exception as e:
+            logger.warning(f"Fundamentals fetch failed for bb={bb}: {e}")
+            fundamentals = empty_fundamentals
+    else:
+        fundamentals = empty_fundamentals
+
+    # Risk indicators
+    risk_n = lookback_months if lookback_months else 36
+    risk = _fetch_risk_indicators(session, u3, n_months=risk_n, as_of=as_of) if include_risk_indicators else []
+
+    # Market data
+    market_n = (lookback_months * 21) if lookback_months else 504
+    market = _fetch_market_data(session, u3, n_days=market_n, as_of=as_of) if include_market_data else []
+
+    # Credit events (always fetched — they're the prediction target context)
     events = _fetch_credit_events(session, u3, as_of=as_of)
-    macro = _fetch_macro_context(session, as_of=as_of)
-    transcripts = _fetch_transcripts(session, u3, as_of=as_of)
+
+    # Macro
+    macro = _fetch_macro_context(session, as_of=as_of) if include_macro else {}
+
+    # Transcripts
+    transcripts = _fetch_transcripts(session, u3, as_of=as_of) if include_transcripts else []
 
     logger.info(
         f"  IS={len(fundamentals['income_statement'])} periods, "

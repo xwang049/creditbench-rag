@@ -20,11 +20,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 from src.benchmark.case_builder import build_cases
 from src.benchmark.config import BenchmarkConfig
-from src.benchmark.data_fetcher import fetch_for_case
 from src.benchmark.evaluator import evaluate, print_report
 from src.benchmark.predictor import predict
 from src.benchmark.prompt_builder import build_prompt
 from src.db.session import get_session
+from src.pipeline.data_fetcher import fetch_all
 
 
 def _load_done_keys(jsonl_path: Path) -> set[tuple]:
@@ -147,7 +147,29 @@ def main():
 
                 # Fetch data
                 try:
-                    data = fetch_for_case(session, case, cfg)
+                    company = {
+                        "u3_company_number": case.u3_company_number,
+                        "id_bb_company": case.id_bb_company,
+                        "ticker": case.ticker,
+                        "company_name": case.company_name,
+                        "country_name": "United States",
+                        "market_status": "—",
+                        "prime_exchange": "—",
+                        "id_isin": None,
+                        "industry_sector": case.industry_sector,
+                        "industry_group": None,
+                        "industry_subgroup": None,
+                    }
+                    data = fetch_all(
+                        session, company,
+                        as_of=case.cutoff_date,
+                        include_fundamentals=cfg.include_fundamentals,
+                        include_risk_indicators=cfg.include_risk_indicators,
+                        include_market_data=cfg.include_market_data,
+                        include_macro=cfg.include_macro,
+                        include_transcripts=False,
+                        lookback_months=cfg.lookback_months,
+                    )
                 except Exception as e:
                     logger.error(f"Data fetch failed for {case.company_name}: {e}")
                     n_errors += 1
