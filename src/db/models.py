@@ -359,7 +359,7 @@ class TranscriptChunk(Base):
 
     # Text and vector
     text_content: Mapped[str] = mapped_column(Text, nullable=False)
-    embedding: Mapped[Optional[list]] = mapped_column(Vector(768), nullable=True)
+    embedding: Mapped[Optional[list]] = mapped_column(Vector(1536), nullable=True)
     embedding_model: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     embedded_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 

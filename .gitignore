@@ -146,3 +146,6 @@ logs/
 *.log
 
 .claude/
+
+# Batch embedding intermediate files
+batch_embed_output/

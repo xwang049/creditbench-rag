@@ -4,8 +4,7 @@ import logging
 import os
 from typing import Optional
 
-from google import genai
-from google.genai import types
+from openai import OpenAI
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -13,26 +12,25 @@ from src.config import config
 
 logger = logging.getLogger(__name__)
 
-EMBED_MODEL = "gemini-embedding-001"
-EMBED_DIMS = 768
+EMBED_MODEL = "text-embedding-3-small"
+EMBED_DIMS = 1536
 
 
-def _get_gemini_client() -> genai.Client:
-    key = os.getenv("GOOGLE_API_KEY") or config.__dict__.get("GOOGLE_API_KEY")
+def _get_openai_client() -> OpenAI:
+    key = os.getenv("OPENAI_API_KEY") or config.OPENAI_API_KEY
     if not key:
-        raise RuntimeError("GOOGLE_API_KEY not set in environment / .env")
-    return genai.Client(api_key=key)
+        raise RuntimeError("OPENAI_API_KEY not set in environment / .env")
+    return OpenAI(api_key=key)
 
 
 def embed_query(query: str) -> list[float]:
     """Embed a single query string for retrieval."""
-    client = _get_gemini_client()
-    result = client.models.embed_content(
+    client = _get_openai_client()
+    response = client.embeddings.create(
         model=EMBED_MODEL,
-        contents=query,
-        config=types.EmbedContentConfig(output_dimensionality=EMBED_DIMS),
+        input=query,
     )
-    return result.embeddings[0].values
+    return response.data[0].embedding
 
 
 def search_transcripts(
