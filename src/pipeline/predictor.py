@@ -1,4 +1,4 @@
-"""LLM-based credit event prediction using Claude."""
+"""LLM-based credit event prediction using OpenAI."""
 
 import json
 import logging
@@ -6,7 +6,7 @@ import re
 from datetime import date
 from typing import Optional
 
-from anthropic import Anthropic
+from openai import OpenAI
 
 from src.config import config
 
@@ -56,7 +56,7 @@ SYSTEM_PROMPT = _SYSTEM_PROMPT_TEMPLATE.format(
 
 def predict(
     context: str,
-    model: str = "claude-sonnet-4-20250514",
+    model: str = "gpt-4o-mini",
     cutoff_date: Optional[date] = None,
     horizon_months: Optional[int] = None,
 ) -> dict:
@@ -64,15 +64,15 @@ def predict(
 
     Args:
         context:        Structured text from context_builder.build_context()
-        model:          Claude model ID
+        model:          OpenAI model ID
         cutoff_date:    Data cutoff date (for benchmark experiments, prevents look-ahead)
         horizon_months: Prediction horizon in months (default: 12-24 generic)
 
     Returns:
         Parsed prediction dict, or a dict with 'error' key on failure.
     """
-    if not config.ANTHROPIC_API_KEY:
-        return {"error": "ANTHROPIC_API_KEY not configured"}
+    if not config.OPENAI_API_KEY:
+        return {"error": "OPENAI_API_KEY not configured"}
 
     # Build time-aware system prompt if cutoff_date is specified
     if cutoff_date is not None:
@@ -93,7 +93,7 @@ def predict(
     else:
         system_prompt = SYSTEM_PROMPT
 
-    client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    client = OpenAI(api_key=config.OPENAI_API_KEY)
 
     user_message = (
         "Analyse the following company and predict its credit event risk.\n\n"
@@ -103,21 +103,24 @@ def predict(
         "Return your assessment as JSON."
     )
 
-    logger.info("Calling Claude for credit prediction...")
+    logger.info("Calling OpenAI for credit prediction...")
 
     try:
-        response = client.messages.create(
+        response = client.chat.completions.create(
             model=model,
             max_tokens=4096,
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_message}],
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
             temperature=0,
+            response_format={"type": "json_object"},
         )
     except Exception as e:
-        logger.error(f"Claude API error: {e}")
+        logger.error(f"OpenAI API error: {e}")
         return {"error": str(e)}
 
-    raw = response.content[0].text.strip()
+    raw = response.choices[0].message.content.strip()
     logger.debug(f"Raw LLM response:\n{raw}")
 
     # Parse JSON — strip markdown fences if the model wraps them anyway
@@ -132,8 +135,8 @@ def predict(
 
     result["_model"] = model
     result["_usage"] = {
-        "input_tokens": response.usage.input_tokens,
-        "output_tokens": response.usage.output_tokens,
+        "input_tokens": response.usage.prompt_tokens,
+        "output_tokens": response.usage.completion_tokens,
     }
     return result
 

@@ -33,7 +33,7 @@ class BenchmarkConfig:
     lookback_months: int = 12
     n_default_cases: int = 100
     n_control_cases: int = 100
-    llm_model: str = "claude-sonnet-4-6"
+    llm_model: str = "gpt-4o-mini"
     # Data-type toggles
     include_risk_indicators: bool = False   # coverage ends 2003; off by default
     include_market_data: bool = False        # excluded per data-scope decision

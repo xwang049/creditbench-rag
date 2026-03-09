@@ -149,3 +149,10 @@ logs/
 
 # Batch embedding intermediate files
 batch_embed_output/
+batch_embed_*/
+
+# Experiment results
+results/
+
+# AI assistant memory
+.claire/

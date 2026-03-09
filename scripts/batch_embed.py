@@ -478,6 +478,13 @@ def cmd_ingest(args):
     total_errors = 0
 
     with get_session() as session:
+        valid_u3 = {
+            row[0] for row in session.execute(
+                text("SELECT u3_company_number FROM companies")
+            ).fetchall()
+        }
+        logger.info(f"Valid u3 company numbers: {len(valid_u3):,}")
+
         for batch_entry in ready:
             fname = batch_entry["jsonl_file"]
             result_file_id = batch_entry["result_file_id"]
@@ -572,9 +579,12 @@ def cmd_ingest(args):
                     meta = {"paragraph_id": pid}
 
                 # Build DB record
+                u3 = meta.get("u3_company_number")
+                if u3 is not None and u3 not in valid_u3:
+                    u3 = None
                 record = {
                     "paragraph_id": pid,
-                    "u3_company_number": meta.get("u3_company_number"),
+                    "u3_company_number": u3,
                     "call_date": meta.get("call_date"),
                     "year": meta.get("year"),
                     "quarter": meta.get("quarter"),
@@ -617,30 +627,11 @@ def cmd_ingest(args):
 
 
 def _upsert_batch(session, records: list[dict]):
-    """Batch upsert: INSERT ... ON CONFLICT DO UPDATE for embedding columns."""
+    """Batch insert: INSERT ... ON CONFLICT DO NOTHING (skip already-embedded rows)."""
     if not records:
         return
-    stmt = insert(TranscriptChunk).values(records)
-    stmt = stmt.on_conflict_do_update(
-        index_elements=["paragraph_id"],
-        set_={
-            "embedding": stmt.excluded.embedding,
-            "embedding_model": stmt.excluded.embedding_model,
-            "embedded_at": stmt.excluded.embedded_at,
-            # Also update metadata in case it was missing before
-            "u3_company_number": stmt.excluded.u3_company_number,
-            "call_date": stmt.excluded.call_date,
-            "year": stmt.excluded.year,
-            "quarter": stmt.excluded.quarter,
-            "event_title": stmt.excluded.event_title,
-            "speaker_type": stmt.excluded.speaker_type,
-            "utterance_type": stmt.excluded.utterance_type,
-            "speaker_name": stmt.excluded.speaker_name,
-            "speaker_title": stmt.excluded.speaker_title,
-            "text_content": stmt.excluded.text_content,
-        },
-    )
-    session.execute(stmt)
+    stmt = insert(TranscriptChunk).on_conflict_do_nothing(index_elements=["paragraph_id"])
+    session.execute(stmt, records)
     session.commit()
 
 
