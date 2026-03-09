@@ -57,8 +57,8 @@ def main():
                         help="Max number of default cases (Group 1)")
     parser.add_argument("--n-control", type=int, default=100,
                         help="Max number of control cases (Group 2)")
-    parser.add_argument("--model", default="claude-sonnet-4-6",
-                        help="Claude model ID")
+    parser.add_argument("--model", default="gpt-4o-mini",
+                        help="OpenAI model ID")
     parser.add_argument("--output", default=None,
                         help="Output directory (default: results/exp_h{horizon}_lb{lookback})")
     parser.add_argument("--no-fundamentals", action="store_true",
