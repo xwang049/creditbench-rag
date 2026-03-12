@@ -18,13 +18,30 @@ from pathlib import Path
 # Allow running as a module from the project root
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
-from src.benchmark.case_builder import build_cases
+from src.benchmark.case_builder import build_cases, CaseRecord
 from src.benchmark.config import BenchmarkConfig
 from src.benchmark.evaluator import evaluate, print_report
 from src.benchmark.predictor import predict
 from src.benchmark.prompt_builder import build_prompt
 from src.db.session import get_session
 from src.pipeline.data_fetcher import fetch_all
+
+
+def _case_to_company(case: CaseRecord) -> dict:
+    """Build the company dict that fetch_all() expects from a CaseRecord."""
+    return {
+        "u3_company_number": case.u3_company_number,
+        "id_bb_company":     case.id_bb_company,
+        "ticker":            case.ticker,
+        "company_name":      case.company_name,
+        "country_name":      "United States",
+        "market_status":     "—",
+        "prime_exchange":    "—",
+        "id_isin":           None,
+        "industry_sector":   case.industry_sector,
+        "industry_group":    None,
+        "industry_subgroup": None,
+    }
 
 
 def _load_done_keys(jsonl_path: Path) -> set[tuple]:
@@ -124,22 +141,9 @@ def main():
                     f"[{i}/{len(cases)}] {case.group:7s} | {case.company_name[:35]:35s} | "
                     f"cutoff={case.cutoff_date}"
                 )
-                company = {
-                    "u3_company_number": case.u3_company_number,
-                    "id_bb_company": case.id_bb_company,
-                    "ticker": case.ticker,
-                    "company_name": case.company_name,
-                    "country_name": "United States",
-                    "market_status": "—",
-                    "prime_exchange": "—",
-                    "id_isin": None,
-                    "industry_sector": case.industry_sector,
-                    "industry_group": None,
-                    "industry_subgroup": None,
-                }
                 try:
                     data = fetch_all(
-                        session, company,
+                        session, _case_to_company(case),
                         as_of=case.cutoff_date,
                         include_fundamentals=cfg.include_fundamentals,
                         include_risk_indicators=cfg.include_risk_indicators,
@@ -198,21 +202,8 @@ def main():
 
                 # Fetch data
                 try:
-                    company = {
-                        "u3_company_number": case.u3_company_number,
-                        "id_bb_company": case.id_bb_company,
-                        "ticker": case.ticker,
-                        "company_name": case.company_name,
-                        "country_name": "United States",
-                        "market_status": "—",
-                        "prime_exchange": "—",
-                        "id_isin": None,
-                        "industry_sector": case.industry_sector,
-                        "industry_group": None,
-                        "industry_subgroup": None,
-                    }
                     data = fetch_all(
-                        session, company,
+                        session, _case_to_company(case),
                         as_of=case.cutoff_date,
                         include_fundamentals=cfg.include_fundamentals,
                         include_risk_indicators=cfg.include_risk_indicators,

@@ -17,18 +17,32 @@ from src.pipeline.adaptive_retriever import retrieve_transcripts
 
 logger = logging.getLogger(__name__)
 
+# Module-level DuckDB connection — views registered once, reused for all queries
+_duckdb_con: duckdb.DuckDBPyConnection | None = None
 
-def _local_duckdb_query(sql: str) -> pd.DataFrame:
-    """Query fundamentals parquets via DuckDB using local paths (skips Azure)."""
+
+def _get_duckdb_connection() -> duckdb.DuckDBPyConnection:
+    """Return a cached DuckDB connection with all fundamentals views registered."""
+    global _duckdb_con
+    if _duckdb_con is not None:
+        return _duckdb_con
+
     local_dir = Path(config.DATA_DIR) / "foundamentals"  # folder name has typo in source data
     con = duckdb.connect()
+    n_views = 0
     for name, filename in FUNDAMENTALS_FILES.items():
         path = local_dir / filename
         if path.exists():
             con.execute(f"CREATE VIEW {name} AS SELECT * FROM read_parquet('{path}')")
-    result = con.execute(sql).df()
-    con.close()
-    return result
+            n_views += 1
+    logger.info(f"DuckDB: registered {n_views}/{len(FUNDAMENTALS_FILES)} fundamentals views")
+    _duckdb_con = con
+    return _duckdb_con
+
+
+def _local_duckdb_query(sql: str) -> pd.DataFrame:
+    """Query fundamentals parquets via DuckDB using the cached connection."""
+    return _get_duckdb_connection().execute(sql).df()
 
 # Fundamentals columns to pull — balanced set covering credit-relevant signals
 _IS_COLS = [

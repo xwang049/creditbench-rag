@@ -24,21 +24,25 @@ def _get_client() -> OpenAI:
         _client = OpenAI(api_key=config.OPENAI_API_KEY)
     return _client
 
-_SYSTEM_PROMPT_TEMPLATE = """\
+# System prompt: role definition, output schema, scoring guidelines.
+# Time constraints (cutoff date, horizon) belong in the user message task header
+# (built by prompt_builder.build_prompt), not here — avoids sending the same
+# information twice and keeps system prompt stable across experiments.
+SYSTEM_PROMPT = """\
 You are a senior credit risk analyst. You will be given a structured financial \
-profile of a company — including historical financial statements, market data, \
-risk indicators, past credit events, and macro context.
+profile of a company — including pre-computed credit-risk ratios, historical \
+financial statements, earnings call excerpts, past credit events, and macro context.
 
-Your task: assess whether this company is likely to experience a **credit event** \
-(bankruptcy filing, debt default, delisting, or severe rating downgrade) \
-{horizon_clause}.
+Your task: assess the probability that this company will experience a \
+**credit event** (bankruptcy filing, debt default, delisting, or severe rating \
+downgrade) within the prediction window defined in the task header below.
 
-IMPORTANT: All data provided is as of {cutoff_date}. Do NOT use any knowledge \
-about events that occurred after {cutoff_date}. Base your assessment solely on \
-the data provided.
+The task header specifies the data cutoff date and prediction window. \
+Do NOT use any knowledge about events that occurred after the cutoff date. \
+Base your assessment solely on the data provided.
 
 Respond in **exactly** this JSON format (no markdown fences):
-{{
+{
   "prediction": "HIGH" | "MEDIUM" | "LOW",
   "confidence": <0–100>,
   "probability_pct": <0–100>,
@@ -46,39 +50,36 @@ Respond in **exactly** this JSON format (no markdown fences):
   "protective_factors": ["...", "..."],
   "reasoning": "2-3 paragraph analysis",
   "data_gaps": ["any missing data that limits your analysis"]
-}}
+}
 
 Guidelines:
 - HIGH = >30% probability of credit event in the prediction horizon
 - MEDIUM = 10–30% probability
 - LOW = <10% probability
-- confidence reflects how certain you are in your assessment given the available data
-- Be specific: cite numbers from the data (revenue trends, leverage ratios, DTD levels, etc.)
-- If critical data is missing (e.g. no recent financials), note it in data_gaps and \
-  adjust confidence downward accordingly
-- Consider both company-specific factors AND the macro environment
+- confidence reflects how certain you are given the available data
+- Be specific: cite numbers (Altman Z, interest coverage, revenue trend, etc.)
+- If critical data is missing, note it in data_gaps and adjust confidence down
+- Consider both company-specific signals AND the macro environment
 """
-
-# Default system prompt (no time constraint — for ad-hoc queries)
-SYSTEM_PROMPT = _SYSTEM_PROMPT_TEMPLATE.format(
-    horizon_clause="within the next 12–24 months",
-    cutoff_date="the most recent available data",
-)
 
 
 def predict(
     context: str,
     model: str = "gpt-4o-mini",
-    cutoff_date: Optional[date] = None,
-    horizon_months: Optional[int] = None,
+    cutoff_date: Optional[date] = None,   # kept for API compat, no longer used here
+    horizon_months: Optional[int] = None,  # kept for API compat, no longer used here
 ) -> dict:
-    """Run credit event prediction given a formatted company context.
+    """Run credit event prediction given a fully-assembled prompt.
 
     Args:
-        context:        Structured text from context_builder.build_context()
+        context:        Complete user message — either the raw context string
+                        (predict_company path) or the full prompt from
+                        prompt_builder.build_prompt() (benchmark path).
+                        Time constraints must be in this string; they are NOT
+                        duplicated into the system prompt.
         model:          OpenAI model ID
-        cutoff_date:    Data cutoff date (for benchmark experiments, prevents look-ahead)
-        horizon_months: Prediction horizon in months (default: 12-24 generic)
+        cutoff_date:    Unused — kept for backward compatibility
+        horizon_months: Unused — kept for backward compatibility
 
     Returns:
         Parsed prediction dict, or a dict with 'error' key on failure.
@@ -88,25 +89,6 @@ def predict(
     except RuntimeError as e:
         return {"error": str(e)}
 
-    # Build time-aware system prompt if cutoff_date is specified
-    if cutoff_date is not None:
-        cutoff_str = cutoff_date.isoformat()
-        if horizon_months:
-            from dateutil.relativedelta import relativedelta
-            end_date = cutoff_date + relativedelta(months=horizon_months)
-            horizon_clause = (
-                f"within the next {horizon_months} months "
-                f"(i.e., between {cutoff_str} and {end_date.isoformat()})"
-            )
-        else:
-            horizon_clause = "within the next 12–24 months"
-        system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(
-            horizon_clause=horizon_clause,
-            cutoff_date=cutoff_str,
-        )
-    else:
-        system_prompt = SYSTEM_PROMPT
-
     logger.info("Calling OpenAI for credit prediction...")
 
     try:
@@ -114,7 +96,7 @@ def predict(
             model=model,
             max_tokens=4096,
             messages=[
-                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": context},
             ],
             temperature=0,
