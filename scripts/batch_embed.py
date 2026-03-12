@@ -18,6 +18,9 @@ import logging
 import os
 import sys
 import time
+import threading
+import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -50,7 +53,7 @@ logger = logging.getLogger(__name__)
 
 EMBED_MODEL = "text-embedding-3-small"
 EMBED_DIMS = 1536
-MAX_BATCH_ROWS = 50_000  # OpenAI limit per batch file
+MAX_BATCH_ROWS = 10_000  # rows per batch file (smaller = ~200MB result files)
 DEFAULT_OUT_DIR = "./batch_embed_output"
 
 TERMINAL_STATUSES = {"completed", "failed", "expired", "cancelled"}
@@ -86,7 +89,8 @@ def _get_openai_client() -> OpenAI:
     key = os.getenv("OPENAI_API_KEY") or config.OPENAI_API_KEY
     if not key:
         raise RuntimeError("OPENAI_API_KEY not set in environment / .env")
-    return OpenAI(api_key=key)
+    # Large timeout for downloading ~1GB result files
+    return OpenAI(api_key=key, timeout=600.0)
 
 
 # ── Phase 1: PREPARE ─────────────────────────────────────────────────────────
@@ -286,15 +290,29 @@ def cmd_submit(args):
 
     n_submitted = 0
     n_skipped = 0
+    limit = getattr(args, "limit", None)
+    retry_failed = getattr(args, "retry_failed", False)
 
     for entry in jsonl_files:
+        if limit is not None and n_submitted >= limit:
+            logger.info(f"Reached --limit {limit}, stopping.")
+            break
+
         fname = entry["filename"]
 
-        # Skip if already submitted
+        # Skip if already submitted (unless it failed and --retry-failed is set)
         existing = batch_lookup.get(fname)
         if existing and existing.get("openai_batch_id"):
-            n_skipped += 1
-            continue
+            if existing.get("status") == "failed" and retry_failed:
+                logger.info(f"Retrying failed batch: {fname}")
+                # Reset entry so it gets re-submitted
+                existing["openai_batch_id"] = None
+                existing["openai_file_id"] = None
+                existing["status"] = None
+                existing["result_file_id"] = None
+            else:
+                n_skipped += 1
+                continue
 
         jsonl_path = out_dir / fname
         if not jsonl_path.exists():
@@ -443,11 +461,149 @@ def cmd_poll(args):
 
 # ── Phase 4: INGEST ──────────────────────────────────────────────────────────
 
+def _download_batch(client, out_dir, fname, result_file_id):
+    """Download one batch result file to a temp path. Returns tmp_path or raises."""
+    tmp_result_path = out_dir / f"{fname}.result.tmp"
+    api_key = client.api_key
+    url = f"https://api.openai.com/v1/files/{result_file_id}/content"
+    headers = {"Authorization": f"Bearer {api_key}"}
+
+    for attempt in range(1, 11):
+        try:
+            # Use requests with per-chunk read timeout (300s between chunks)
+            # This is more resilient than httpx for large file downloads
+            with requests.get(url, headers=headers, stream=True, timeout=(10, 300)) as resp:
+                resp.raise_for_status()
+                with open(tmp_result_path, "wb") as tf:
+                    for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                        tf.write(chunk)
+            return tmp_result_path
+        except Exception as e:
+            logger.warning(f"  Download attempt {attempt}/10 failed for {fname}: {e}")
+            if tmp_result_path.exists():
+                tmp_result_path.unlink()
+            if attempt < 10:
+                time.sleep(10 * attempt)
+    raise RuntimeError(f"All download attempts failed for {fname}")
+
+
+def _process_one_batch(batch_entry, out_dir, meta_file_lookup, valid_u3, client, batch_size, manifest, manifest_lock):
+    """Download + parse + insert one batch. Runs in a worker thread."""
+    fname = batch_entry["jsonl_file"]
+    result_file_id = batch_entry["result_file_id"]
+    meta_file = meta_file_lookup[fname]
+    meta_path = out_dir / meta_file
+
+    logger.info(f"Starting {fname}...")
+
+    # Download
+    try:
+        tmp_result_path = _download_batch(client, out_dir, fname, result_file_id)
+    except Exception as e:
+        logger.error(f"  Download failed for {fname}: {e}")
+        return 0, 1
+
+    # Load metadata sidecar
+    meta_lookup: dict[int, dict] = {}
+    with open(meta_path) as mf:
+        for line in mf:
+            line = line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            meta_lookup[rec["paragraph_id"]] = rec
+
+    # Parse and insert using a dedicated session
+    records = []
+    batch_errors = 0
+    inserted = 0
+    now = datetime.now(timezone.utc)
+
+    with get_session() as session:
+        with open(tmp_result_path) as result_file:
+            for line in result_file:
+                if not line.strip():
+                    continue
+                try:
+                    result_obj = json.loads(line)
+                except json.JSONDecodeError:
+                    batch_errors += 1
+                    continue
+
+                custom_id = result_obj.get("custom_id", "")
+                response = result_obj.get("response", {})
+
+                if response.get("status_code") != 200:
+                    batch_errors += 1
+                    continue
+
+                try:
+                    pid = int(custom_id.split("_", 1)[1])
+                except (IndexError, ValueError):
+                    batch_errors += 1
+                    continue
+
+                body = response.get("body", {})
+                data_list = body.get("data", [])
+                if not data_list:
+                    batch_errors += 1
+                    continue
+                embedding = data_list[0].get("embedding")
+                if not embedding:
+                    batch_errors += 1
+                    continue
+
+                meta = meta_lookup.get(pid) or {"paragraph_id": pid}
+                u3 = meta.get("u3_company_number")
+                if u3 is not None and u3 not in valid_u3:
+                    u3 = None
+
+                records.append({
+                    "paragraph_id": pid,
+                    "u3_company_number": u3,
+                    "call_date": meta.get("call_date"),
+                    "year": meta.get("year"),
+                    "quarter": meta.get("quarter"),
+                    "event_title": meta.get("event_title"),
+                    "speaker_type": meta.get("speaker_type"),
+                    "utterance_type": meta.get("utterance_type"),
+                    "speaker_name": meta.get("speaker_name"),
+                    "speaker_title": meta.get("speaker_title"),
+                    "text_content": meta.get("text_content", ""),
+                    "embedding": embedding,
+                    "embedding_model": EMBED_MODEL,
+                    "embedded_at": now,
+                })
+
+                if len(records) >= batch_size:
+                    _upsert_batch(session, records)
+                    inserted += len(records)
+                    records = []
+
+        if records:
+            _upsert_batch(session, records)
+            inserted += len(records)
+
+    # Clean up temp file
+    if tmp_result_path.exists():
+        tmp_result_path.unlink()
+
+    # Thread-safe manifest update
+    with manifest_lock:
+        batch_entry["ingested"] = True
+        batch_entry["error_count"] = batch_errors
+        _save_manifest(out_dir, manifest)
+
+    logger.info(f"  ✓ {fname}: {inserted:,} rows inserted, errors={batch_errors}")
+    return inserted, batch_errors
+
+
 def cmd_ingest(args):
     """Download results from OpenAI and INSERT embeddings into PostgreSQL."""
     out_dir = Path(args.out_dir)
     manifest = _load_manifest(out_dir)
     batch_size = args.batch_size
+    workers = getattr(args, "parallel_downloads", 3)
 
     if not manifest.get("batches"):
         logger.error("No batches found. Run `submit` and `poll` first.")
@@ -472,153 +628,47 @@ def cmd_ingest(args):
         )
         return
 
-    logger.info(f"{len(ready)} batches ready for ingest")
+    logger.info(f"{len(ready)} batches ready for ingest (workers={workers})")
 
-    total_inserted = 0
-    total_errors = 0
+    # Build meta_file lookup and filter valid batches
+    meta_file_lookup = {jf["filename"]: jf.get("meta_file") for jf in manifest["prepare"]["jsonl_files"]}
+    valid_ready = [
+        b for b in ready
+        if meta_file_lookup.get(b["jsonl_file"])
+        and (out_dir / meta_file_lookup[b["jsonl_file"]]).exists()
+    ]
 
+    # Load valid u3 once (read-only, shared across threads)
     with get_session() as session:
         valid_u3 = {
             row[0] for row in session.execute(
                 text("SELECT u3_company_number FROM companies")
             ).fetchall()
         }
-        logger.info(f"Valid u3 company numbers: {len(valid_u3):,}")
+    logger.info(f"Valid u3 company numbers: {len(valid_u3):,}")
 
-        for batch_entry in ready:
-            fname = batch_entry["jsonl_file"]
-            result_file_id = batch_entry["result_file_id"]
+    manifest_lock = threading.Lock()
+    total_inserted = 0
+    total_errors = 0
 
-            # Find corresponding meta file
-            meta_file = None
-            for jf in manifest["prepare"]["jsonl_files"]:
-                if jf["filename"] == fname:
-                    meta_file = jf.get("meta_file")
-                    break
-
-            if not meta_file:
-                logger.warning(f"No meta file for {fname}, skipping")
-                continue
-
-            meta_path = out_dir / meta_file
-            if not meta_path.exists():
-                logger.warning(f"Meta file missing: {meta_file}, skipping")
-                continue
-
-            logger.info(f"Ingesting {fname} (result: {result_file_id})...")
-
-            # Load metadata sidecar
-            meta_lookup: dict[int, dict] = {}
-            with open(meta_path) as mf:
-                for line in mf:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    rec = json.loads(line)
-                    meta_lookup[rec["paragraph_id"]] = rec
-
-            # Download result from OpenAI (streaming)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(
+                _process_one_batch,
+                batch_entry, out_dir, meta_file_lookup, valid_u3,
+                client, batch_size, manifest, manifest_lock
+            ): batch_entry["jsonl_file"]
+            for batch_entry in valid_ready
+        }
+        for fut in as_completed(futures):
+            fname = futures[fut]
             try:
-                result_content = client.files.content(result_file_id)
-                result_text = result_content.text
+                inserted, errors = fut.result()
+                total_inserted += inserted
+                total_errors += errors
             except Exception as e:
-                logger.error(f"  Failed to download result for {fname}: {e}")
+                logger.error(f"  Worker failed for {fname}: {e}")
                 total_errors += 1
-                continue
-
-            # Parse results and batch insert
-            records = []
-            batch_errors = 0
-            now = datetime.now(timezone.utc)
-
-            for line in result_text.strip().split("\n"):
-                if not line.strip():
-                    continue
-
-                try:
-                    result_obj = json.loads(line)
-                except json.JSONDecodeError:
-                    batch_errors += 1
-                    continue
-
-                custom_id = result_obj.get("custom_id", "")
-                response = result_obj.get("response", {})
-
-                # Check for errors
-                if response.get("status_code") != 200:
-                    batch_errors += 1
-                    error_body = response.get("body", {}).get("error", {})
-                    logger.debug(
-                        f"  Error for {custom_id}: {error_body.get('message', 'unknown')}"
-                    )
-                    continue
-
-                # Extract paragraph_id from custom_id: "pid_12345"
-                try:
-                    pid = int(custom_id.split("_", 1)[1])
-                except (IndexError, ValueError):
-                    logger.warning(f"  Bad custom_id: {custom_id}")
-                    batch_errors += 1
-                    continue
-
-                # Extract embedding
-                body = response.get("body", {})
-                data_list = body.get("data", [])
-                if not data_list:
-                    batch_errors += 1
-                    continue
-                embedding = data_list[0].get("embedding")
-                if not embedding:
-                    batch_errors += 1
-                    continue
-
-                # Get metadata
-                meta = meta_lookup.get(pid)
-                if not meta:
-                    logger.debug(f"  No metadata for pid={pid}, inserting with embedding only")
-                    meta = {"paragraph_id": pid}
-
-                # Build DB record
-                u3 = meta.get("u3_company_number")
-                if u3 is not None and u3 not in valid_u3:
-                    u3 = None
-                record = {
-                    "paragraph_id": pid,
-                    "u3_company_number": u3,
-                    "call_date": meta.get("call_date"),
-                    "year": meta.get("year"),
-                    "quarter": meta.get("quarter"),
-                    "event_title": meta.get("event_title"),
-                    "speaker_type": meta.get("speaker_type"),
-                    "utterance_type": meta.get("utterance_type"),
-                    "speaker_name": meta.get("speaker_name"),
-                    "speaker_title": meta.get("speaker_title"),
-                    "text_content": meta.get("text_content", ""),
-                    "embedding": embedding,
-                    "embedding_model": EMBED_MODEL,
-                    "embedded_at": now,
-                }
-                records.append(record)
-
-                # Flush in batches
-                if len(records) >= batch_size:
-                    _upsert_batch(session, records)
-                    total_inserted += len(records)
-                    records = []
-
-            # Flush remaining
-            if records:
-                _upsert_batch(session, records)
-                total_inserted += len(records)
-
-            batch_entry["ingested"] = True
-            batch_entry["error_count"] = batch_errors
-            total_errors += batch_errors
-            _save_manifest(out_dir, manifest)
-
-            logger.info(
-                f"  ✓ {fname}: ingested, errors={batch_errors}"
-            )
 
     logger.info(
         f"[OK] Ingest complete: {total_inserted:,} rows inserted/updated, "
@@ -654,6 +704,8 @@ def main():
     # submit
     p_submit = sub.add_parser("submit", help="Upload JSONLs and create OpenAI batch jobs")
     p_submit.add_argument("--out-dir", type=str, default=DEFAULT_OUT_DIR)
+    p_submit.add_argument("--retry-failed", action="store_true", help="Re-submit batches with status=failed")
+    p_submit.add_argument("--limit", type=int, default=None, help="Max number of batches to submit in this run")
 
     # poll
     p_poll = sub.add_parser("poll", help="Check batch statuses")
@@ -664,6 +716,7 @@ def main():
     p_ingest = sub.add_parser("ingest", help="Download results and INSERT into PostgreSQL")
     p_ingest.add_argument("--out-dir", type=str, default=DEFAULT_OUT_DIR)
     p_ingest.add_argument("--batch-size", type=int, default=5000, help="DB insert batch size")
+    p_ingest.add_argument("--parallel-downloads", type=int, default=3, help="Number of parallel downloads")
 
     args = parser.parse_args()
 

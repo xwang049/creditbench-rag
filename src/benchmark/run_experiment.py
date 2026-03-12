@@ -113,14 +113,63 @@ def main():
         logger.info(f"Total cases: {len(cases)}")
 
         if args.dry_run:
-            logger.info("Dry-run mode: printing case summary, no LLM calls")
-            for case in cases[:5]:
-                print(f"  [{case.group}] {case.company_name} ({case.ticker}) "
-                      f"cutoff={case.cutoff_date} label={case.label}")
-            if len(cases) > 5:
-                print(f"  ... and {len(cases) - 5} more")
-            print(f"\nTotal: {len(cases)} cases ({sum(c.label for c in cases)} default, "
-                  f"{sum(not c.label for c in cases)} control)")
+            logger.info("Dry-run mode: fetching data for all cases, no LLM calls")
+            stats = {
+                "total": len(cases), "fetch_ok": 0, "fetch_error": 0,
+                "has_fundamentals": 0, "has_macro": 0, "has_market": 0,
+                "prompt_chars": [],
+            }
+            for i, case in enumerate(cases, 1):
+                logger.info(
+                    f"[{i}/{len(cases)}] {case.group:7s} | {case.company_name[:35]:35s} | "
+                    f"cutoff={case.cutoff_date}"
+                )
+                company = {
+                    "u3_company_number": case.u3_company_number,
+                    "id_bb_company": case.id_bb_company,
+                    "ticker": case.ticker,
+                    "company_name": case.company_name,
+                    "country_name": "United States",
+                    "market_status": "—",
+                    "prime_exchange": "—",
+                    "id_isin": None,
+                    "industry_sector": case.industry_sector,
+                    "industry_group": None,
+                    "industry_subgroup": None,
+                }
+                try:
+                    data = fetch_all(
+                        session, company,
+                        as_of=case.cutoff_date,
+                        include_fundamentals=cfg.include_fundamentals,
+                        include_risk_indicators=cfg.include_risk_indicators,
+                        include_market_data=cfg.include_market_data,
+                        include_macro=cfg.include_macro,
+                        include_transcripts=False,
+                        lookback_months=cfg.lookback_months,
+                    )
+                    prompt = build_prompt(data, case, cfg)
+                    stats["fetch_ok"] += 1
+                    stats["prompt_chars"].append(len(prompt))
+                    if data.get("fundamentals"):
+                        stats["has_fundamentals"] += 1
+                    if data.get("macro"):
+                        stats["has_macro"] += 1
+                    if data.get("market_data"):
+                        stats["has_market"] += 1
+                except Exception as e:
+                    logger.error(f"  FAILED {case.company_name}: {e}")
+                    stats["fetch_error"] += 1
+
+            chars = stats["prompt_chars"]
+            print(f"\n=== Dry-run Summary ({stats['total']} cases) ===")
+            print(f"  Fetch OK:          {stats['fetch_ok']} / {stats['total']}")
+            print(f"  Fetch errors:      {stats['fetch_error']}")
+            print(f"  Has fundamentals:  {stats['has_fundamentals']} / {stats['fetch_ok']}")
+            print(f"  Has macro data:    {stats['has_macro']} / {stats['fetch_ok']}")
+            print(f"  Has market data:   {stats['has_market']} / {stats['fetch_ok']}")
+            if chars:
+                print(f"  Prompt chars:      min={min(chars):,}  avg={int(sum(chars)/len(chars)):,}  max={max(chars):,}")
             return
 
         # --- Step 2: Load done keys for resume ---
