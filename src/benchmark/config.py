@@ -46,6 +46,9 @@ class BenchmarkConfig:
     # Contamination-prevention
     anonymize_company: bool = True          # replace name/ticker with u3 ID
     blur_year: bool = True                  # map YYYY → Y0/Y-1/… in all dates
+    # Event year filter (for targeted experiments)
+    event_year_from: int | None = None   # only include events on/after this year
+    event_year_to:   int | None = None   # only include events on/before this year
     # Output
     output_dir: str = "results/benchmark"
     random_seed: int = 42

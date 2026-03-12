@@ -86,6 +86,10 @@ def main():
                         help="Build cases and fetch data, but do NOT call the LLM")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for control group sampling")
+    parser.add_argument("--event-year-from", type=int, default=None,
+                        help="Only include default events on/after this year")
+    parser.add_argument("--event-year-to", type=int, default=None,
+                        help="Only include default events on/before this year")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Enable DEBUG logging")
     args = parser.parse_args()
@@ -106,6 +110,8 @@ def main():
         llm_model=args.model,
         include_fundamentals=not args.no_fundamentals,
         random_seed=args.seed,
+        event_year_from=args.event_year_from,
+        event_year_to=args.event_year_to,
         output_dir=args.output or f"results/exp_h{args.horizon}_lb{args.lookback}",
     )
 

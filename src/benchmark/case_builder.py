@@ -68,6 +68,13 @@ def build_default_cases(
 
     for row in rows:
         event_date: date = row.event_date
+
+        # Year-range filter (for targeted experiments)
+        if cfg.event_year_from and event_date.year < cfg.event_year_from:
+            continue
+        if cfg.event_year_to and event_date.year > cfg.event_year_to:
+            continue
+
         cutoff_date = event_date - relativedelta(months=cfg.prediction_horizon_months)
 
         # Require id_bb_company for DuckDB fundamentals lookup
