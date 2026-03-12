@@ -39,6 +39,10 @@ class BenchmarkConfig:
     include_market_data: bool = False        # excluded per data-scope decision
     include_macro: bool = True
     include_fundamentals: bool = True
+    # Transcript retrieval
+    include_transcripts: bool = True         # include earnings call transcript chunks
+    transcript_mode: str = "rag"             # "rag" (signal-driven) or "date" (recent N)
+    transcript_k: int = 8                    # number of chunks to retrieve
     # Contamination-prevention
     anonymize_company: bool = True          # replace name/ticker with u3 ID
     blur_year: bool = True                  # map YYYY → Y0/Y-1/… in all dates

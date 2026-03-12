@@ -145,7 +145,9 @@ def main():
                         include_risk_indicators=cfg.include_risk_indicators,
                         include_market_data=cfg.include_market_data,
                         include_macro=cfg.include_macro,
-                        include_transcripts=False,
+                        include_transcripts=cfg.include_transcripts,
+                        transcript_mode=cfg.transcript_mode,
+                        transcript_k=cfg.transcript_k,
                         lookback_months=cfg.lookback_months,
                     )
                     prompt = build_prompt(data, case, cfg)
@@ -216,7 +218,9 @@ def main():
                         include_risk_indicators=cfg.include_risk_indicators,
                         include_market_data=cfg.include_market_data,
                         include_macro=cfg.include_macro,
-                        include_transcripts=False,
+                        include_transcripts=cfg.include_transcripts,
+                        transcript_mode=cfg.transcript_mode,
+                        transcript_k=cfg.transcript_k,
                         lookback_months=cfg.lookback_months,
                     )
                 except Exception as e:

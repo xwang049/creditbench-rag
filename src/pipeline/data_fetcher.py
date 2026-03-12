@@ -12,6 +12,8 @@ from sqlalchemy.orm import Session
 
 from src.config import config
 from src.db.duckdb_query import FUNDAMENTALS_FILES
+from src.pipeline.feature_engineer import compute_financial_signals
+from src.pipeline.adaptive_retriever import retrieve_transcripts
 
 logger = logging.getLogger(__name__)
 
@@ -363,6 +365,8 @@ def fetch_all(
     include_market_data: bool = True,
     include_macro: bool = True,
     include_transcripts: bool = True,
+    transcript_mode: str = "rag",
+    transcript_k: int = 8,
     lookback_months: Optional[int] = None,
 ) -> dict:
     """Fetch all available data for a company.
@@ -377,10 +381,13 @@ def fetch_all(
         include_market_data:   Pull daily price / market cap
         include_macro:         Pull macro snapshot
         include_transcripts:   Pull earnings call transcript chunks
+        transcript_mode:       "rag" (signal-driven semantic search) or
+                               "date" (most-recent N chunks, no embedding)
+        transcript_k:          Number of transcript chunks to retrieve
         lookback_months:       If set, limit risk_indicators and market_data windows
 
     Returns:
-        Dict with keys: company, fundamentals, risk_indicators,
+        Dict with keys: company, fundamentals, signals, risk_indicators,
                         market_data, credit_events, macro, transcripts
     """
     u3 = company["u3_company_number"]
@@ -389,7 +396,7 @@ def fetch_all(
     logger.info(f"Fetching data for {company['company_name']} (u3={u3}, bb={bb})"
                 + (f" as_of={as_of}" if as_of else ""))
 
-    # Fundamentals
+    # ── Fundamentals ──────────────────────────────────────────────────────────
     empty_fundamentals = {"income_statement": [], "balance_sheet": [], "cash_flow": []}
     if include_fundamentals and bb is not None and fundamentals_available():
         try:
@@ -400,37 +407,55 @@ def fetch_all(
     else:
         fundamentals = empty_fundamentals
 
-    # Risk indicators
+    # ── Layer 1: Feature engineering ─────────────────────────────────────────
+    signals = compute_financial_signals(fundamentals) if include_fundamentals else None
+
+    # ── Risk indicators ───────────────────────────────────────────────────────
     risk_n = lookback_months if lookback_months else 36
     risk = _fetch_risk_indicators(session, u3, n_months=risk_n, as_of=as_of) if include_risk_indicators else []
 
-    # Market data
+    # ── Market data ───────────────────────────────────────────────────────────
     market_n = (lookback_months * 21) if lookback_months else 504
     market = _fetch_market_data(session, u3, n_days=market_n, as_of=as_of) if include_market_data else []
 
-    # Credit events (always fetched — they're the prediction target context)
+    # ── Credit events (always fetched) ────────────────────────────────────────
     events = _fetch_credit_events(session, u3, as_of=as_of)
 
-    # Macro
+    # ── Macro ─────────────────────────────────────────────────────────────────
     macro = _fetch_macro_context(session, as_of=as_of) if include_macro else {}
 
-    # Transcripts
-    transcripts = _fetch_transcripts(session, u3, as_of=as_of) if include_transcripts else []
+    # ── Layer 2: Transcript retrieval ─────────────────────────────────────────
+    transcripts: list[dict] = []
+    if include_transcripts:
+        if transcript_mode == "rag" and signals is not None:
+            transcripts = retrieve_transcripts(
+                session=session,
+                signals=signals,
+                u3_company_number=u3,
+                industry=company.get("industry_sector"),
+                as_of=as_of,
+                k=transcript_k,
+            )
+        else:
+            # Fallback: date-filtered, no semantic search
+            transcripts = _fetch_transcripts(session, u3, n=transcript_k, as_of=as_of)
 
     logger.info(
         f"  IS={len(fundamentals['income_statement'])} periods, "
         f"BS={len(fundamentals['balance_sheet'])} periods, "
         f"CF={len(fundamentals['cash_flow'])} periods, "
         f"risk={len(risk)}, market={len(market)}, "
-        f"events={len(events)}, transcripts={len(transcripts)}"
+        f"events={len(events)}, transcripts={len(transcripts)} "
+        f"({'rag' if transcript_mode == 'rag' and signals else 'date'})"
     )
 
     return {
-        "company": company,
-        "fundamentals": fundamentals,
-        "risk_indicators": risk,
-        "market_data": market,
-        "credit_events": events,
-        "macro": macro,
-        "transcripts": transcripts,
+        "company":          company,
+        "fundamentals":     fundamentals,
+        "signals":          signals,          # Layer 1 output (None if no fundamentals)
+        "risk_indicators":  risk,
+        "market_data":      market,
+        "credit_events":    events,
+        "macro":            macro,
+        "transcripts":      transcripts,
     }
