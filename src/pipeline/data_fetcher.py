@@ -112,7 +112,10 @@ def _fetch_fundamentals(
 
     as_of_filter = ""
     if as_of:
-        as_of_filter = f"AND (ANNOUNCEMENT_DT IS NULL OR ANNOUNCEMENT_DT <= '{as_of.isoformat()}')"
+        # ANNOUNCEMENT_DT is stored as YYYYMMDD string (e.g. '20230324'), not ISO.
+        # Using ISO format '2023-10-22' for comparison would produce wrong results
+        # because '20230324' > '2023-10-22' in ASCII order (digit '0' > dash '-').
+        as_of_filter = f"AND (ANNOUNCEMENT_DT IS NULL OR ANNOUNCEMENT_DT = 'N.A.' OR ANNOUNCEMENT_DT <= '{as_of.strftime('%Y%m%d')}')"
 
     results = {}
 
