@@ -258,14 +258,12 @@ def _management_commentary(chunks: list[dict]) -> str:
         return _section("Management Commentary (Earnings Calls)", "(no transcript data)")
     parts = []
     for c in chunks:
-        period = f"Y? Q{c.get('quarter') or '?'}"
-        if c.get("year"):
-            period = f"Y? Q{c.get('quarter') or '?'}"   # year is blurred upstream
         call_date = c.get("call_date") or "?"
+        quarter = c.get("quarter") or "?"
         speaker = c.get("speaker_name") or "?"
         role = c.get("speaker_type") or "?"
         text = (c.get("text_content") or "").strip()[:600]
-        parts.append(f"[{call_date} Q{c.get('quarter') or '?'} — {speaker} ({role})]:\n{text}")
+        parts.append(f"[{call_date} Q{quarter} — {speaker} ({role})]:\n{text}")
     return _section("Management Commentary (Earnings Calls)", "\n\n".join(parts))
 
 

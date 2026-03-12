@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 def _local_duckdb_query(sql: str) -> pd.DataFrame:
     """Query fundamentals parquets via DuckDB using local paths (skips Azure)."""
-    local_dir = Path(config.DATA_DIR) / "foundamentals"
+    local_dir = Path(config.DATA_DIR) / "foundamentals"  # folder name has typo in source data
     con = duckdb.connect()
     for name, filename in FUNDAMENTALS_FILES.items():
         path = local_dir / filename
@@ -351,7 +351,7 @@ def _fetch_transcripts(
 
 def fundamentals_available() -> bool:
     """Return True if at least one fundamentals parquet file is accessible locally."""
-    local_dir = Path(config.DATA_DIR) / "foundamentals"
+    local_dir = Path(config.DATA_DIR) / "foundamentals"  # folder name has typo in source data
     return local_dir.exists() and any(local_dir.glob("*.parquet"))
 
 

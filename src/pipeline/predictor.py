@@ -12,6 +12,18 @@ from src.config import config
 
 logger = logging.getLogger(__name__)
 
+# Module-level client — created once, reused across all calls
+_client: OpenAI | None = None
+
+
+def _get_client() -> OpenAI:
+    global _client
+    if _client is None:
+        if not config.OPENAI_API_KEY:
+            raise RuntimeError("OPENAI_API_KEY not configured")
+        _client = OpenAI(api_key=config.OPENAI_API_KEY)
+    return _client
+
 _SYSTEM_PROMPT_TEMPLATE = """\
 You are a senior credit risk analyst. You will be given a structured financial \
 profile of a company — including historical financial statements, market data, \
@@ -71,8 +83,10 @@ def predict(
     Returns:
         Parsed prediction dict, or a dict with 'error' key on failure.
     """
-    if not config.OPENAI_API_KEY:
-        return {"error": "OPENAI_API_KEY not configured"}
+    try:
+        client = _get_client()
+    except RuntimeError as e:
+        return {"error": str(e)}
 
     # Build time-aware system prompt if cutoff_date is specified
     if cutoff_date is not None:
@@ -93,16 +107,6 @@ def predict(
     else:
         system_prompt = SYSTEM_PROMPT
 
-    client = OpenAI(api_key=config.OPENAI_API_KEY)
-
-    user_message = (
-        "Analyse the following company and predict its credit event risk.\n\n"
-        "---\n"
-        f"{context}\n"
-        "---\n\n"
-        "Return your assessment as JSON."
-    )
-
     logger.info("Calling OpenAI for credit prediction...")
 
     try:
@@ -111,7 +115,7 @@ def predict(
             max_tokens=4096,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message},
+                {"role": "user", "content": context},
             ],
             temperature=0,
             response_format={"type": "json_object"},
@@ -144,7 +148,7 @@ def predict(
 def predict_company(
     session,
     identifier: str,
-    model: str = "claude-sonnet-4-20250514",
+    model: str = "gpt-4o-mini",
 ) -> dict:
     """End-to-end: identifier → data fetch → context → LLM prediction.
 
@@ -157,7 +161,14 @@ def predict_company(
     company = lookup(session, identifier)
     data = fetch_all(session, company)
     context = build_context(data)
-    prediction = predict(context, model=model)
+    user_message = (
+        "Analyse the following company and predict its credit event risk.\n\n"
+        "---\n"
+        f"{context}\n"
+        "---\n\n"
+        "Return your assessment as JSON."
+    )
+    prediction = predict(user_message, model=model)
 
     return {
         "company": company,

@@ -70,15 +70,8 @@ def build_default_cases(
         event_date: date = row.event_date
         cutoff_date = event_date - relativedelta(months=cfg.prediction_horizon_months)
 
-        # Require at least some market_data before cutoff_date
-        has_data = session.execute(text("""
-            SELECT 1 FROM market_data
-            WHERE u3_company_number = :u3
-              AND trading_date <= :cutoff
-            LIMIT 1
-        """), {"u3": row.u3_company_number, "cutoff": cutoff_date}).fetchone()
-
-        if not has_data:
+        # Require id_bb_company for DuckDB fundamentals lookup
+        if row.id_bb_company is None:
             skipped_no_data += 1
             continue
 
@@ -95,7 +88,7 @@ def build_default_cases(
         ))
 
     logger.info(
-        f"Default cases: {len(cases)} valid, {skipped_no_data} skipped (no market data before cutoff)"
+        f"Default cases: {len(cases)} valid, {skipped_no_data} skipped (no id_bb_company)"
     )
 
     # Sample down to n_default_cases if needed
@@ -146,15 +139,8 @@ def build_control_cases(
         # Assign a cutoff_date from Group 1's distribution
         cutoff_date = rng.choice(reference_cutoff_dates)
 
-        # Require market data before cutoff_date
-        has_data = session.execute(text("""
-            SELECT 1 FROM market_data
-            WHERE u3_company_number = :u3
-              AND trading_date <= :cutoff
-            LIMIT 1
-        """), {"u3": row.u3_company_number, "cutoff": cutoff_date}).fetchone()
-
-        if not has_data:
+        # Require id_bb_company for DuckDB fundamentals lookup
+        if row.id_bb_company is None:
             skipped_no_data += 1
             continue
 
@@ -171,7 +157,7 @@ def build_control_cases(
         ))
 
     logger.info(
-        f"Control cases: {len(cases)} valid, {skipped_no_data} skipped (no market data before cutoff)"
+        f"Control cases: {len(cases)} valid, {skipped_no_data} skipped (no id_bb_company)"
     )
     return cases
 
