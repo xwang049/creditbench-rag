@@ -95,6 +95,24 @@ def retrieve_transcripts(
         List of transcript chunk dicts with similarity scores
     """
     year_to = as_of.year if as_of else None
+    call_date_to = as_of  # strict cutoff prevents look-ahead within the year
+
+    # Skip embedding API call if no transcripts exist for this company/period
+    from sqlalchemy import text as _text
+    count_params: dict = {"u3": u3_company_number}
+    count_filter = "u3_company_number = :u3"
+    if year_to is not None:
+        count_filter += " AND year <= :year_to"
+        count_params["year_to"] = year_to
+    has_transcripts = session.execute(
+        _text(f"SELECT 1 FROM transcript_chunks WHERE {count_filter} LIMIT 1"),
+        count_params,
+    ).fetchone()
+
+    if not has_transcripts:
+        logger.info(f"  No transcripts found for u3={u3_company_number} year<={year_to}, skipping embed")
+        return []
+
     query = build_adaptive_query(signals, industry)
 
     try:
@@ -104,6 +122,7 @@ def retrieve_transcripts(
             k=k,
             u3_company_number=u3_company_number,
             year_to=year_to,
+            call_date_to=call_date_to,
         )
     except Exception as e:
         logger.warning(f"Adaptive retrieval failed (u3={u3_company_number}): {e}")

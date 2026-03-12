@@ -99,16 +99,23 @@ def evaluate(jsonl_path: Union[str, Path]) -> dict:
         auc = None
         logger.warning(f"AUC computation failed: {e}")
 
-    # Accuracy at threshold 50
-    predicted_labels = [1 if p >= 50 else 0 for p in probs]
-    correct = sum(p == l for p, l in zip(predicted_labels, labels))
-    accuracy = correct / n_parsed
+    # Optimal threshold via Youden's J (maximises TPR - FPR)
+    best_thresh, best_j = _youden_threshold(labels, probs)
 
-    # Confusion matrix
-    tp = sum(1 for p, l in zip(predicted_labels, labels) if p == 1 and l == 1)
-    fp = sum(1 for p, l in zip(predicted_labels, labels) if p == 1 and l == 0)
-    fn = sum(1 for p, l in zip(predicted_labels, labels) if p == 0 and l == 1)
-    tn = sum(1 for p, l in zip(predicted_labels, labels) if p == 0 and l == 0)
+    # Metrics at multiple thresholds
+    thresholds = sorted({25, 30, 35, 40, best_thresh, 50})
+    threshold_metrics = {}
+    for t in thresholds:
+        preds = [1 if p >= t else 0 for p in probs]
+        tp_t = sum(1 for p, l in zip(preds, labels) if p == 1 and l == 1)
+        fp_t = sum(1 for p, l in zip(preds, labels) if p == 1 and l == 0)
+        fn_t = sum(1 for p, l in zip(preds, labels) if p == 0 and l == 1)
+        tn_t = sum(1 for p, l in zip(preds, labels) if p == 0 and l == 0)
+        acc_t = sum(p == l for p, l in zip(preds, labels)) / n_parsed
+        threshold_metrics[t] = {
+            "accuracy": round(acc_t, 4),
+            "confusion_matrix": {"TP": tp_t, "FP": fp_t, "FN": fn_t, "TN": tn_t},
+        }
 
     avg_prob_default = sum(default_probs) / len(default_probs) if default_probs else None
     avg_prob_control = sum(control_probs) / len(control_probs) if control_probs else None
@@ -119,12 +126,37 @@ def evaluate(jsonl_path: Union[str, Path]) -> dict:
         "n_parsed": n_parsed,
         "n_error": n_error,
         "auc_roc": round(auc, 4) if auc is not None else None,
-        "accuracy_at_50": round(accuracy, 4),
+        "optimal_threshold": best_thresh,
+        "optimal_youden_j": round(best_j, 4),
+        "threshold_metrics": threshold_metrics,
+        # Keep legacy key for backward compat
+        "accuracy_at_50": threshold_metrics[50]["accuracy"],
+        "confusion_matrix": threshold_metrics[50]["confusion_matrix"],
         "avg_prob_default_group": round(avg_prob_default, 1) if avg_prob_default is not None else None,
         "avg_prob_control_group": round(avg_prob_control, 1) if avg_prob_control is not None else None,
-        "confusion_matrix": {"TN": tn, "FP": fp, "FN": fn, "TP": tp},
         "errors": errors if errors else [],
     }
+
+
+def _youden_threshold(labels: list[int], probs: list[float]) -> tuple[int, float]:
+    """Find optimal threshold via Youden's J = TPR - FPR.
+
+    Returns (threshold, j_score) where threshold is in [0, 100].
+    """
+    best_t, best_j = 50, -1.0
+    n_pos = sum(labels)
+    n_neg = len(labels) - n_pos
+    if n_pos == 0 or n_neg == 0:
+        return 50, 0.0
+    for t in range(1, 100):
+        preds = [1 if p >= t else 0 for p in probs]
+        tpr = sum(1 for p, l in zip(preds, labels) if p == 1 and l == 1) / n_pos
+        fpr = sum(1 for p, l in zip(preds, labels) if p == 1 and l == 0) / n_neg
+        j = tpr - fpr
+        if j > best_j:
+            best_j = j
+            best_t = t
+    return best_t, best_j
 
 
 def _manual_auc(labels: list[int], scores: list[float]) -> float:
@@ -149,15 +181,27 @@ def print_report(metrics: dict) -> None:
     print()
 
     auc = metrics.get("auc_roc")
-    acc = metrics.get("accuracy_at_50")
-    print(f"AUC-ROC        : {auc:.4f}" if auc is not None else "AUC-ROC        : N/A")
-    print(f"Accuracy@50    : {acc:.4f}" if acc is not None else "Accuracy@50    : N/A")
+    opt_t = metrics.get("optimal_threshold")
+    opt_j = metrics.get("optimal_youden_j")
+    print(f"AUC-ROC              : {auc:.4f}" if auc is not None else "AUC-ROC              : N/A")
+    if opt_t is not None:
+        print(f"Optimal threshold    : {opt_t}%  (Youden's J = {opt_j:.4f})")
     print()
 
     pd = metrics.get("avg_prob_default_group")
     pc = metrics.get("avg_prob_control_group")
     print(f"Avg prob (default group) : {pd:.1f}%" if pd is not None else "Avg prob (default group) : N/A")
     print(f"Avg prob (control group) : {pc:.1f}%" if pc is not None else "Avg prob (control group) : N/A")
+    print()
+
+    thresh_metrics = metrics.get("threshold_metrics", {})
+    if thresh_metrics:
+        print(f"{'Threshold':>10}  {'Accuracy':>10}  {'TP':>6}  {'FP':>6}  {'FN':>6}  {'TN':>6}")
+        print("  " + "-" * 52)
+        for t, tm in sorted(thresh_metrics.items()):
+            marker = " ← optimal" if t == opt_t else ""
+            cm = tm["confusion_matrix"]
+            print(f"  {t:>8}%  {tm['accuracy']:>10.4f}  {cm['TP']:>6}  {cm['FP']:>6}  {cm['FN']:>6}  {cm['TN']:>6}{marker}")
     print()
 
     cm = metrics.get("confusion_matrix", {})

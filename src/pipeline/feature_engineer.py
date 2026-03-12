@@ -63,14 +63,21 @@ def _trend(recent: Optional[float], old: Optional[float]) -> str:
 
 
 def _altman_z(is_r: dict, bs_r: dict) -> Optional[float]:
-    """Altman Z-Score (public company, 1968 formula).
+    """Altman Z'-Score (private firm variant, Altman 1983).
 
-    Z = 1.2*X1 + 1.4*X2 + 3.3*X3 + 0.6*X4 + 1.0*X5
+    Uses book equity for X4 instead of market capitalisation (the original
+    1968 public-firm formula uses market cap / total liabilities for X4).
+    We use the Z' variant because market_data is optional and often absent.
+
+    Z' = 1.2*X1 + 1.4*X2 + 3.3*X3 + 0.6*X4 + 1.0*X5
     X1 = Working Capital / Total Assets
     X2 = Net Income / Total Assets  (retained earnings proxy)
     X3 = EBIT / Total Assets
-    X4 = Book Equity / Total Liabilities
+    X4 = Book Equity / Total Liabilities  (assets - total debt)
     X5 = Revenue / Total Assets
+
+    Z' zones: > 2.9 safe, 1.23–2.9 grey, < 1.23 distress
+    (thresholds differ slightly from the public-firm version)
     """
     assets   = _f(bs_r.get("BS_TOT_ASSET"))
     cur_a    = _f(bs_r.get("BS_CUR_ASSET_REPORT"))

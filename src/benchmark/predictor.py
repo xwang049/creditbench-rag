@@ -29,7 +29,7 @@ def predict(
         On failure: {"error": "...", "probability_pct": None}
     """
     logger.info(
-        f"  [{case.group}] {case.company_name} cutoff={case.cutoff_date} → calling Claude"
+        f"  [{case.group}] {case.company_name} cutoff={case.cutoff_date} → {cfg.llm_model}"
     )
 
     result = _pipeline_predict(
