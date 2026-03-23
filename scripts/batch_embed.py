@@ -4,12 +4,13 @@
     python scripts/batch_embed.py prepare [--data-dir PATH] [--year-from N] [--year-to N] [--out-dir PATH] [--force]
     python scripts/batch_embed.py submit  [--out-dir PATH]
     python scripts/batch_embed.py poll    [--out-dir PATH] [--wait]
-    python scripts/batch_embed.py ingest  [--out-dir PATH] [--batch-size 5000]
+    python scripts/batch_embed.py ingest  [--out-dir PATH] [--parquet-out-dir PATH]
 
-Phase 1 (prepare): Read parquet sources, filter, write JSONL files (≤50k rows each) + metadata sidecars.
+Phase 1 (prepare): Read parquet sources, filter, write JSONL files (≤10k rows each) + metadata sidecars.
 Phase 2 (submit):  Upload JSONLs to OpenAI, create batch jobs.
 Phase 3 (poll):    Check batch statuses. --wait loops until all done.
-Phase 4 (ingest):  Download results from OpenAI, parse embeddings, INSERT into PostgreSQL.
+Phase 4 (ingest):  Download results from OpenAI, write embeddings to Parquet files,
+                   insert metadata (without embedding) into PostgreSQL for existence checks.
 """
 
 import argparse
@@ -27,7 +28,16 @@ from pathlib import Path
 # Allow running from project root
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
+try:
+    import orjson as json_lib   # 3-5x faster float parsing
+    def _loads(s): return json_lib.loads(s)
+except ImportError:
+    import json as json_lib
+    def _loads(s): return json_lib.loads(s)
 from openai import OpenAI
 from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert
@@ -55,8 +65,25 @@ EMBED_MODEL = "text-embedding-3-small"
 EMBED_DIMS = 1536
 MAX_BATCH_ROWS = 10_000  # rows per batch file (smaller = ~200MB result files)
 DEFAULT_OUT_DIR = "./batch_embed_output"
+DEFAULT_PARQUET_OUT_DIR = os.path.expanduser(
+    "~/Library/CloudStorage/OneDrive-共享的库-NationalUniversityofSingapore"
+    "/Li Shuping - Data/embeddings"
+)
 
 TERMINAL_STATUSES = {"completed", "failed", "expired", "cancelled"}
+
+# Parquet schema for embedding files
+EMBED_SCHEMA = pa.schema([
+    pa.field("paragraph_id",      pa.int64()),
+    pa.field("u3_company_number", pa.int32()),
+    pa.field("call_date",         pa.date32()),
+    pa.field("year",              pa.int16()),
+    pa.field("quarter",           pa.int8()),
+    pa.field("speaker_type",      pa.string()),
+    pa.field("speaker_name",      pa.string()),
+    pa.field("text_content",      pa.string()),
+    pa.field("embedding",         pa.list_(pa.float32(), EMBED_DIMS)),
+])
 
 
 # ── Manifest helpers ─────────────────────────────────────────────────────────
@@ -94,6 +121,7 @@ def _get_openai_client() -> OpenAI:
 
 
 # ── Phase 1: PREPARE ─────────────────────────────────────────────────────────
+
 
 def cmd_prepare(args):
     """Read parquets, filter, generate JSONL + metadata sidecar files."""
@@ -462,33 +490,46 @@ def cmd_poll(args):
 # ── Phase 4: INGEST ──────────────────────────────────────────────────────────
 
 def _download_batch(client, out_dir, fname, result_file_id):
-    """Download one batch result file to a temp path. Returns tmp_path or raises."""
+    """Download one batch result file to a temp path. Returns tmp_path or raises.
+
+    Supports HTTP Range resume: if the temp file already exists from a partial
+    download, sends a Range header to continue from where it left off.
+    """
     tmp_result_path = out_dir / f"{fname}.result.tmp"
     api_key = client.api_key
     url = f"https://api.openai.com/v1/files/{result_file_id}/content"
-    headers = {"Authorization": f"Bearer {api_key}"}
 
     for attempt in range(1, 11):
         try:
-            # Use requests with per-chunk read timeout (300s between chunks)
-            # This is more resilient than httpx for large file downloads
+            # Resume from partial download if temp file exists
+            existing_bytes = tmp_result_path.stat().st_size if tmp_result_path.exists() else 0
+            headers = {"Authorization": f"Bearer {api_key}"}
+            if existing_bytes > 0:
+                headers["Range"] = f"bytes={existing_bytes}-"
+                logger.info(f"  Resuming {fname} from {existing_bytes:,} bytes")
+
             with requests.get(url, headers=headers, stream=True, timeout=(10, 300)) as resp:
+                if resp.status_code == 416:
+                    # Range not satisfiable — file already complete
+                    return tmp_result_path
                 resp.raise_for_status()
-                with open(tmp_result_path, "wb") as tf:
+                mode = "ab" if existing_bytes > 0 and resp.status_code == 206 else "wb"
+                if mode == "wb" and existing_bytes > 0:
+                    existing_bytes = 0  # server didn't support Range, restart
+                with open(tmp_result_path, mode) as tf:
                     for chunk in resp.iter_content(chunk_size=1024 * 1024):
                         tf.write(chunk)
             return tmp_result_path
         except Exception as e:
             logger.warning(f"  Download attempt {attempt}/10 failed for {fname}: {e}")
-            if tmp_result_path.exists():
-                tmp_result_path.unlink()
             if attempt < 10:
                 time.sleep(10 * attempt)
     raise RuntimeError(f"All download attempts failed for {fname}")
 
 
-def _process_one_batch(batch_entry, out_dir, meta_file_lookup, valid_u3, client, batch_size, manifest, manifest_lock):
-    """Download + parse + insert one batch. Runs in a worker thread."""
+def _process_one_batch(batch_entry, out_dir, meta_file_lookup, valid_u3, client,
+                       parquet_out_dir, manifest, manifest_lock):
+    """Download + parse + write parquet + insert metadata to PG. Runs in a worker thread."""
     fname = batch_entry["jsonl_file"]
     result_file_id = batch_entry["result_file_id"]
     meta_file = meta_file_lookup[fname]
@@ -510,83 +551,132 @@ def _process_one_batch(batch_entry, out_dir, meta_file_lookup, valid_u3, client,
             line = line.strip()
             if not line:
                 continue
-            rec = json.loads(line)
+            rec = _loads(line)
             meta_lookup[rec["paragraph_id"]] = rec
 
-    # Parse and insert using a dedicated session
-    records = []
+    # Parse embeddings
+    rows: list[dict] = []
     batch_errors = 0
-    inserted = 0
     now = datetime.now(timezone.utc)
 
-    with get_session() as session:
-        with open(tmp_result_path) as result_file:
-            for line in result_file:
-                if not line.strip():
-                    continue
+    with open(tmp_result_path) as result_file:
+        for line in result_file:
+            if not line.strip():
+                continue
+            try:
+                result_obj = _loads(line)
+            except (ValueError, KeyError):
+                batch_errors += 1
+                continue
+
+            custom_id = result_obj.get("custom_id", "")
+            response = result_obj.get("response", {})
+
+            if response.get("status_code") != 200:
+                batch_errors += 1
+                continue
+
+            try:
+                pid = int(custom_id.split("_", 1)[1])
+            except (IndexError, ValueError):
+                batch_errors += 1
+                continue
+
+            body = response.get("body", {})
+            data_list = body.get("data", [])
+            if not data_list:
+                batch_errors += 1
+                continue
+            embedding = data_list[0].get("embedding")
+            if not embedding:
+                batch_errors += 1
+                continue
+
+            meta = meta_lookup.get(pid) or {"paragraph_id": pid}
+            u3 = meta.get("u3_company_number")
+            if u3 is not None and u3 not in valid_u3:
+                u3 = None
+
+            call_date_raw = meta.get("call_date")
+            if isinstance(call_date_raw, str):
+                from datetime import date as _date
                 try:
-                    result_obj = json.loads(line)
-                except json.JSONDecodeError:
-                    batch_errors += 1
-                    continue
+                    call_date_val = _date.fromisoformat(call_date_raw)
+                except ValueError:
+                    call_date_val = None
+            else:
+                call_date_val = call_date_raw
 
-                custom_id = result_obj.get("custom_id", "")
-                response = result_obj.get("response", {})
-
-                if response.get("status_code") != 200:
-                    batch_errors += 1
-                    continue
-
-                try:
-                    pid = int(custom_id.split("_", 1)[1])
-                except (IndexError, ValueError):
-                    batch_errors += 1
-                    continue
-
-                body = response.get("body", {})
-                data_list = body.get("data", [])
-                if not data_list:
-                    batch_errors += 1
-                    continue
-                embedding = data_list[0].get("embedding")
-                if not embedding:
-                    batch_errors += 1
-                    continue
-
-                meta = meta_lookup.get(pid) or {"paragraph_id": pid}
-                u3 = meta.get("u3_company_number")
-                if u3 is not None and u3 not in valid_u3:
-                    u3 = None
-
-                records.append({
-                    "paragraph_id": pid,
-                    "u3_company_number": u3,
-                    "call_date": meta.get("call_date"),
-                    "year": meta.get("year"),
-                    "quarter": meta.get("quarter"),
-                    "event_title": meta.get("event_title"),
-                    "speaker_type": meta.get("speaker_type"),
-                    "utterance_type": meta.get("utterance_type"),
-                    "speaker_name": meta.get("speaker_name"),
-                    "speaker_title": meta.get("speaker_title"),
-                    "text_content": meta.get("text_content", ""),
-                    "embedding": embedding,
-                    "embedding_model": EMBED_MODEL,
-                    "embedded_at": now,
-                })
-
-                if len(records) >= batch_size:
-                    _upsert_batch(session, records)
-                    inserted += len(records)
-                    records = []
-
-        if records:
-            _upsert_batch(session, records)
-            inserted += len(records)
+            rows.append({
+                "paragraph_id":      pid,
+                "u3_company_number": u3,
+                "call_date":         call_date_val,
+                "year":              meta.get("year"),
+                "quarter":           meta.get("quarter"),
+                "speaker_type":      meta.get("speaker_type"),
+                "speaker_name":      meta.get("speaker_name"),
+                "text_content":      meta.get("text_content", ""),
+                "embedding":         [float(x) for x in embedding],
+            })
 
     # Clean up temp file
     if tmp_result_path.exists():
         tmp_result_path.unlink()
+
+    if not rows:
+        logger.warning(f"  {fname}: no rows parsed, errors={batch_errors}")
+        with manifest_lock:
+            batch_entry["ingested"] = True
+            batch_entry["error_count"] = batch_errors
+            _save_manifest(out_dir, manifest)
+        return 0, batch_errors
+
+    # ── Write embeddings to Parquet ──────────────────────────────────────────
+    # Write to a local tmp file first, then move to parquet_out_dir.
+    # This avoids triggering OneDrive/cloud sync on every write chunk.
+    parquet_name = fname.replace(".jsonl", ".parquet")
+    parquet_path = parquet_out_dir / parquet_name
+    tmp_parquet = out_dir / f"{parquet_name}.tmp"
+    table = pa.Table.from_pydict(
+        {
+            "paragraph_id":      pa.array([r["paragraph_id"]      for r in rows], pa.int64()),
+            "u3_company_number": pa.array([r["u3_company_number"]  for r in rows], pa.int32()),
+            "call_date":         pa.array([r["call_date"]          for r in rows], pa.date32()),
+            "year":              pa.array([r["year"]               for r in rows], pa.int16()),
+            "quarter":           pa.array([r["quarter"]            for r in rows], pa.int8()),
+            "speaker_type":      pa.array([r["speaker_type"]       for r in rows], pa.string()),
+            "speaker_name":      pa.array([r["speaker_name"]       for r in rows], pa.string()),
+            "text_content":      pa.array([r["text_content"]       for r in rows], pa.string()),
+            "embedding":         pa.array([r["embedding"]          for r in rows],
+                                          pa.list_(pa.float32(), EMBED_DIMS)),
+        },
+        schema=EMBED_SCHEMA,
+    )
+    pq.write_table(table, tmp_parquet, compression="zstd")
+    os.replace(tmp_parquet, parquet_path)   # atomic move → triggers one sync event
+
+    # ── Insert metadata (no embedding) into PostgreSQL for existence checks ──
+    meta_records = [
+        {
+            "paragraph_id":      r["paragraph_id"],
+            "u3_company_number": r["u3_company_number"],
+            "call_date":         r["call_date"],
+            "year":              r["year"],
+            "quarter":           r["quarter"],
+            "event_title":       meta_lookup.get(r["paragraph_id"], {}).get("event_title"),
+            "speaker_type":      r["speaker_type"],
+            "utterance_type":    meta_lookup.get(r["paragraph_id"], {}).get("utterance_type"),
+            "speaker_name":      r["speaker_name"],
+            "speaker_title":     meta_lookup.get(r["paragraph_id"], {}).get("speaker_title"),
+            "text_content":      r["text_content"],
+            "embedding_model":   EMBED_MODEL,
+            "embedded_at":       now,
+            # embedding omitted — stored in parquet only
+        }
+        for r in rows
+    ]
+    with get_session() as session:
+        _upsert_metadata(session, meta_records)
 
     # Thread-safe manifest update
     with manifest_lock:
@@ -594,16 +684,17 @@ def _process_one_batch(batch_entry, out_dir, meta_file_lookup, valid_u3, client,
         batch_entry["error_count"] = batch_errors
         _save_manifest(out_dir, manifest)
 
-    logger.info(f"  ✓ {fname}: {inserted:,} rows inserted, errors={batch_errors}")
-    return inserted, batch_errors
+    logger.info(f"  ✓ {fname}: {len(rows):,} rows → parquet + PG metadata, errors={batch_errors}")
+    return len(rows), batch_errors
 
 
 def cmd_ingest(args):
-    """Download results from OpenAI and INSERT embeddings into PostgreSQL."""
+    """Download results from OpenAI, write embeddings to Parquet, insert metadata to PostgreSQL."""
     out_dir = Path(args.out_dir)
     manifest = _load_manifest(out_dir)
-    batch_size = args.batch_size
-    workers = getattr(args, "parallel_downloads", 3)
+    parquet_out_dir = Path(args.parquet_out_dir)
+    parquet_out_dir.mkdir(parents=True, exist_ok=True)
+    workers = getattr(args, "parallel_downloads", 1)
 
     if not manifest.get("batches"):
         logger.error("No batches found. Run `submit` and `poll` first.")
@@ -656,7 +747,7 @@ def cmd_ingest(args):
             executor.submit(
                 _process_one_batch,
                 batch_entry, out_dir, meta_file_lookup, valid_u3,
-                client, batch_size, manifest, manifest_lock
+                client, parquet_out_dir, manifest, manifest_lock
             ): batch_entry["jsonl_file"]
             for batch_entry in valid_ready
         }
@@ -676,8 +767,12 @@ def cmd_ingest(args):
     )
 
 
-def _upsert_batch(session, records: list[dict]):
-    """Batch insert: INSERT ... ON CONFLICT DO NOTHING (skip already-embedded rows)."""
+def _upsert_metadata(session, records: list[dict]):
+    """Insert transcript metadata (without embedding) into PostgreSQL.
+
+    Used for existence checks in adaptive_retriever. ON CONFLICT DO NOTHING
+    so re-ingesting a batch does not overwrite existing rows.
+    """
     if not records:
         return
     stmt = insert(TranscriptChunk).on_conflict_do_nothing(index_elements=["paragraph_id"])
@@ -713,10 +808,11 @@ def main():
     p_poll.add_argument("--wait", action="store_true", help="Loop until all batches complete")
 
     # ingest
-    p_ingest = sub.add_parser("ingest", help="Download results and INSERT into PostgreSQL")
+    p_ingest = sub.add_parser("ingest", help="Download results, write parquet, insert metadata to PostgreSQL")
     p_ingest.add_argument("--out-dir", type=str, default=DEFAULT_OUT_DIR)
-    p_ingest.add_argument("--batch-size", type=int, default=5000, help="DB insert batch size")
-    p_ingest.add_argument("--parallel-downloads", type=int, default=3, help="Number of parallel downloads")
+    p_ingest.add_argument("--parquet-out-dir", type=str, default=DEFAULT_PARQUET_OUT_DIR,
+                          help="Directory to write embedding parquet files (default: ./data/embeddings)")
+    p_ingest.add_argument("--parallel-downloads", type=int, default=1, help="Number of parallel downloads")
 
     args = parser.parse_args()
 

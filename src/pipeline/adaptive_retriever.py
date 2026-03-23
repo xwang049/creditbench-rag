@@ -1,7 +1,7 @@
 """Layer 2: Adaptive retrieval — build transcript query from financial signals.
 
 Uses Layer 1 signals to construct a semantically targeted query, then calls
-pgvector cosine search to retrieve the most relevant earnings call excerpts.
+parquet + numpy cosine search to retrieve the most relevant earnings call excerpts.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from src.rag.transcript_retriever import search_transcripts
+from src.rag.transcript_retriever import search_transcripts_parquet
 
 logger = logging.getLogger(__name__)
 
@@ -97,32 +97,15 @@ def retrieve_transcripts(
     year_to = as_of.year if as_of else None
     call_date_to = as_of  # strict cutoff prevents look-ahead within the year
 
-    # Skip embedding API call if no transcripts exist for this company/period
-    from sqlalchemy import text as _text
-    count_params: dict = {"u3": u3_company_number}
-    count_filter = "u3_company_number = :u3"
-    if year_to is not None:
-        count_filter += " AND year <= :year_to"
-        count_params["year_to"] = year_to
-    has_transcripts = session.execute(
-        _text(f"SELECT 1 FROM transcript_chunks WHERE {count_filter} LIMIT 1"),
-        count_params,
-    ).fetchone()
-
-    if not has_transcripts:
-        logger.info(f"  No transcripts found for u3={u3_company_number} year<={year_to}, skipping embed")
-        return []
-
     query = build_adaptive_query(signals, industry)
 
     try:
-        chunks = search_transcripts(
-            session=session,
+        chunks = search_transcripts_parquet(
             query=query,
-            k=k,
             u3_company_number=u3_company_number,
-            year_to=year_to,
+            k=k,
             call_date_to=call_date_to,
+            year_to=year_to,
         )
     except Exception as e:
         logger.warning(f"Adaptive retrieval failed (u3={u3_company_number}): {e}")

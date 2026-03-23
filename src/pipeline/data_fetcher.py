@@ -347,7 +347,7 @@ def _fetch_transcripts(
         SELECT call_date, year, quarter, speaker_type, speaker_name, text_content
         FROM transcript_chunks
         WHERE u3_company_number = :u3
-          AND embedding IS NOT NULL
+          AND embedding_model IS NOT NULL
           {date_filter}
         ORDER BY call_date DESC NULLS LAST
         LIMIT :n

@@ -80,6 +80,10 @@ def main():
                         help="Output directory (default: results/exp_h{horizon}_lb{lookback})")
     parser.add_argument("--no-fundamentals", action="store_true",
                         help="Skip DuckDB fundamentals (use when parquet files are unavailable)")
+    parser.add_argument("--no-transcripts", action="store_true",
+                        help="Skip transcript retrieval (baseline / ablation)")
+    parser.add_argument("--transcript-mode", default=None, choices=["rag", "date"],
+                        help="Transcript retrieval mode: rag (signal-driven) or date (recent N)")
     parser.add_argument("--resume", action="store_true",
                         help="Skip cases already in the output JSONL (for resuming interrupted runs)")
     parser.add_argument("--dry-run", action="store_true",
@@ -109,6 +113,8 @@ def main():
         n_control_cases=args.n_control,
         llm_model=args.model,
         include_fundamentals=not args.no_fundamentals,
+        include_transcripts=not args.no_transcripts,
+        transcript_mode=args.transcript_mode or "rag",
         random_seed=args.seed,
         event_year_from=args.event_year_from,
         event_year_to=args.event_year_to,
