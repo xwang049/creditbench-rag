@@ -33,7 +33,7 @@ from src.db.session import get_session
 from src.features.config import (
     CR2_FEATURES, CRI_DIRECT, CRI_TREND,
     DATA_DIR, FUND_DIR, MKTCAP_PATH, CRI_PATH,
-)
+)  # DATA_DIR used as default output path
 
 logger = logging.getLogger(__name__)
 
@@ -706,7 +706,8 @@ def assemble_and_write(con: duckdb.DuckDBPyConnection, output_path: str) -> None
 
 def main():
     parser = argparse.ArgumentParser(description="Build credit feature matrix")
-    parser.add_argument("--output", default="features_matrix.parquet",
+    parser.add_argument("--output",
+                        default=str(DATA_DIR / "features_matrix.parquet"),
                         help="Output parquet path")
     parser.add_argument("--year-from", type=int, default=2000,
                         help="Start year (default: 2000)")
